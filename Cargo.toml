@@ -7,4 +7,4 @@ authors = ["Philipp Oppermann <dev@phil-opp.com>"]
 crate-type = ["staticlib"]
 
 [dependencies]
-rlibc = "*"
+rlibc = "0.1.4"
