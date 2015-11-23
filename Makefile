@@ -30,7 +30,7 @@ clean:
 	@rm -r build
 
 run: $(iso)
-	@qemu-system-x86_64 -hda $(iso)
+	@qemu-system-x86_64 -drive format=raw,file=$(iso)
 
 iso: $(iso)
 
