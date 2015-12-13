@@ -24,9 +24,9 @@ start:
     call check_cpuid
     call check_long_mode
 
-    call setup_page_tables
+    call set_up_page_tables
     call enable_paging
-    call setup_SSE
+    call set_up_SSE
 
     ; load the 64-bit GDT
     lgdt [gdt64.pointer]
@@ -39,7 +39,7 @@ start:
 
     jmp gdt64.code:long_mode_start
 
-setup_page_tables:
+set_up_page_tables:
     ; map first P4 entry to P3 table
     mov eax, p3_table
     or eax, 0b11 ; present + writable
@@ -141,7 +141,7 @@ check_long_mode:
     jmp error
 
 ; Check for SSE and enable it. If it's not supported throw error "a".
-setup_SSE:
+set_up_SSE:
     ; check for SSE
     mov eax, 0x1
     cpuid
