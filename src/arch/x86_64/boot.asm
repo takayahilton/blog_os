@@ -24,7 +24,7 @@ start:
     call check_cpuid
     call check_long_mode
 
-    call setup_page_tables
+    call set_up_page_tables
     call enable_paging
 
     ; load the 64-bit GDT
@@ -38,7 +38,7 @@ start:
 
     jmp gdt64.code:long_mode_start
 
-setup_page_tables:
+set_up_page_tables:
     ; map first P4 entry to P3 table
     mov eax, p3_table
     or eax, 0b11 ; present + writable
