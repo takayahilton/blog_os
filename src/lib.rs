@@ -23,7 +23,7 @@ extern crate spin;
 mod vga_buffer;
 
 #[no_mangle]
-pub extern fn rust_main() {
+pub extern "C" fn rust_main() {
     // ATTENTION: we have a very small stack and no guard page
     vga_buffer::clear_screen();
     println!("Hello World{}", "!");
@@ -33,8 +33,8 @@ pub extern fn rust_main() {
 
 #[cfg(not(test))]
 #[lang = "eh_personality"]
-extern fn eh_personality() {}
+extern "C" fn eh_personality() {}
 
 #[cfg(not(test))]
 #[lang = "panic_fmt"]
-extern fn panic_fmt() -> ! {loop{}}
+extern "C" fn panic_fmt() -> ! {loop{}}
