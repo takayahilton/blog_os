@@ -1,7 +1,14 @@
-# blogOS
-[![Build Status](https://travis-ci.org/phil-opp/blog_os.svg?branch=master)](https://travis-ci.org/phil-opp/blog_os)
+# Blog OS (Remap the Kernel)
+[![Build Status](https://travis-ci.org/phil-opp/blog_os.svg?branch=remap_the_kernel)](https://travis-ci.org/phil-opp/blog_os/branches)
 
-This repository contains the code for the “Writing an OS in Rust” series at [os.phil-opp.com](http://os.phil-opp.com).
+This repository contains the source code for the [Remap the Kernel](http://os.phil-opp.com/remap-the-kernel.html) post of the [Writing an OS in Rust](http://os.phil-opp.com) series.
 
-# License
-The source code is dual-licensed under MIT or the Apache License (Version 2.0). This excludes the `posts` and `pages` directories.
+**Check out the [master branch](https://github.com/phil-opp/blog_os) for more information.**
+
+## Building
+You need to have `nasm`, `grub-mkrescue`, `xorriso`, `qemu`, and a nightly Rust compiler installed. Then you can run it using `make run`.
+
+Please file an issue if you have any problems.
+
+## License
+The source code is dual-licensed under MIT or the Apache License (Version 2.0).
