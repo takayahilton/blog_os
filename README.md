@@ -6,7 +6,7 @@ This repository contains the source code for the [A Minimal x86 Kernel](http://o
 **Check out the [master branch](https://github.com/phil-opp/blog_os) for more information.**
 
 ## Building
-You need to have `nasm`, `grub-mkrescue`, and `qemu` installed. Then you can run it using `make run`.
+You need to have `nasm`, `grub-mkrescue`, `xorriso`, and `qemu` installed. Then you can run it using `make run`.
 
 Please file an issue if you have any problems.
 
