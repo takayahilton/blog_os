@@ -87,9 +87,11 @@ impl<L> IndexMut<usize> for Table<L> where L: TableLevel
 pub trait TableLevel {}
 
 pub enum Level4 {}
-enum Level3 {}
-enum Level2 {}
-enum Level1 {}
+#[allow(dead_code)]
+pub enum Level3 {}
+#[allow(dead_code)]
+pub enum Level2 {}
+pub enum Level1 {}
 
 impl TableLevel for Level4 {}
 impl TableLevel for Level3 {}
