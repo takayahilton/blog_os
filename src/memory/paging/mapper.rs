@@ -33,7 +33,7 @@ impl Mapper {
     pub fn translate(&self, virtual_address: VirtualAddress) -> Option<PhysicalAddress> {
         let offset = virtual_address % PAGE_SIZE;
         self.translate_page(Page::containing_address(virtual_address))
-            .map(|frame| frame.number * PAGE_SIZE + offset)
+            .map(|frame| PhysicalAddress(frame.number * PAGE_SIZE + offset))
     }
 
     pub fn translate_page(&self, page: Page) -> Option<Frame> {
@@ -95,7 +95,7 @@ impl Mapper {
     pub fn identity_map<A>(&mut self, frame: Frame, flags: EntryFlags, allocator: &mut A)
         where A: FrameAllocator
     {
-        let page = Page::containing_address(frame.start_address());
+        let page = Page::containing_address(frame.start_address().0);
         self.map_to(page, frame, flags, allocator)
     }
 

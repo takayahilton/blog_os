@@ -21,7 +21,7 @@ mod mapper;
 
 const ENTRY_COUNT: usize = 512;
 
-pub type PhysicalAddress = usize;
+pub struct PhysicalAddress(pub usize);
 pub type VirtualAddress = usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -141,7 +141,7 @@ impl ActivePageTable {
             p4_frame: Frame::containing_address(unsafe { controlregs::cr3() } as usize),
         };
         unsafe {
-            controlregs::cr3_write(new_table.p4_frame.start_address() as u64);
+            controlregs::cr3_write(new_table.p4_frame.start_address().0 as u64);
         }
         old_table
     }
@@ -219,7 +219,7 @@ pub fn remap_the_kernel<A>(allocator: &mut A, boot_info: &BootInformation) -> Ac
     let old_table = active_table.switch(new_table);
     println!("NEW TABLE!!!");
 
-    let old_p4_page = Page::containing_address(old_table.p4_frame.start_address());
+    let old_p4_page = Page::containing_address(old_table.p4_frame.start_address().0);
     active_table.unmap(old_p4_page, allocator);
     println!("guard page at {:#x}", old_p4_page.start_address());
 
