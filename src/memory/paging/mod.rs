@@ -22,7 +22,7 @@ mod mapper;
 const ENTRY_COUNT: usize = 512;
 
 pub struct PhysicalAddress(pub usize);
-pub type VirtualAddress = usize;
+pub struct VirtualAddress(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Page {
@@ -31,14 +31,14 @@ pub struct Page {
 
 impl Page {
     pub fn containing_address(address: VirtualAddress) -> Page {
-        assert!(address < 0x0000_8000_0000_0000 || address >= 0xffff_8000_0000_0000,
+        assert!(address.0 < 0x0000_8000_0000_0000 || address.0 >= 0xffff_8000_0000_0000,
                 "invalid address: 0x{:x}",
-                address);
-        Page { number: address / PAGE_SIZE }
+                address.0);
+        Page { number: address.0 / PAGE_SIZE }
     }
 
-    fn start_address(&self) -> usize {
-        self.number * PAGE_SIZE
+    fn start_address(&self) -> VirtualAddress {
+        VirtualAddress(self.number * PAGE_SIZE)
     }
 
     fn p4_index(&self) -> usize {
@@ -219,9 +219,9 @@ pub fn remap_the_kernel<A>(allocator: &mut A, boot_info: &BootInformation) -> Ac
     let old_table = active_table.switch(new_table);
     println!("NEW TABLE!!!");
 
-    let old_p4_page = Page::containing_address(old_table.p4_frame.start_address().0);
+    let old_p4_page = Page::containing_address(VirtualAddress(old_table.p4_frame.start_address().0));
     active_table.unmap(old_p4_page, allocator);
-    println!("guard page at {:#x}", old_p4_page.start_address());
+    println!("guard page at {:#x}", old_p4_page.start_address().0);
 
     active_table
 }

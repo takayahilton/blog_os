@@ -52,8 +52,9 @@ pub fn init(boot_info: &BootInformation) {
     use self::paging::Page;
     use hole_list_allocator::{HEAP_START, HEAP_SIZE};
 
-    let heap_start_page = Page::containing_address(HEAP_START);
-    let heap_end_page = Page::containing_address(HEAP_START + HEAP_SIZE - 1);
+    use self::paging::VirtualAddress;
+    let heap_start_page = Page::containing_address(VirtualAddress(HEAP_START));
+    let heap_end_page = Page::containing_address(VirtualAddress(HEAP_START + HEAP_SIZE - 1));
 
     for page in Page::range_inclusive(heap_start_page, heap_end_page) {
         active_table.map(page, paging::WRITABLE, &mut frame_allocator);

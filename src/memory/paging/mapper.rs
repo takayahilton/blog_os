@@ -31,7 +31,7 @@ impl Mapper {
     }
 
     pub fn translate(&self, virtual_address: VirtualAddress) -> Option<PhysicalAddress> {
-        let offset = virtual_address % PAGE_SIZE;
+        let offset = virtual_address.0 % PAGE_SIZE;
         self.translate_page(Page::containing_address(virtual_address))
             .map(|frame| PhysicalAddress(frame.number * PAGE_SIZE + offset))
     }
@@ -95,7 +95,7 @@ impl Mapper {
     pub fn identity_map<A>(&mut self, frame: Frame, flags: EntryFlags, allocator: &mut A)
         where A: FrameAllocator
     {
-        let page = Page::containing_address(frame.start_address().0);
+        let page = Page::containing_address(VirtualAddress(frame.start_address().0));
         self.map_to(page, frame, flags, allocator)
     }
 
@@ -111,7 +111,7 @@ impl Mapper {
                      .expect("mapping code does not support huge pages");
         let frame = p1[page.p1_index()].pointed_frame().unwrap();
         p1[page.p1_index()].set_unused();
-        unsafe { ::x86::tlb::flush(page.start_address()) };
+        unsafe { ::x86::tlb::flush(page.start_address().0) };
         // TODO free p(1,2,3) table if empty
         // allocator.deallocate_frame(frame);
     }
