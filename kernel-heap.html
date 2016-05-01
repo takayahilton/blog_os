@@ -319,11 +319,12 @@
 </code></pre></div>
 
 <p>When we try to compile it using <code>make run</code>, we get several linker errors about a function named <code>_Unwind_Resume</code>:</p>
-<div class="highlight"><pre><span></span>target/x86_64-unknown-linux-gnu/debug/libblog_os.a(bump_allocator-[…].0.o):
-    In function `bump_allocator::__rust_allocate&#39;:
+
+<pre><code>target/x86_64-unknown-linux-gnu/debug/libblog_os.a(bump_allocator-[…].0.o):
+    In function `bump_allocator::__rust_allocate':
 /home/…/blog_os/libs/bump_allocator/src/lib.rs:19:
-    undefined reference to `_Unwind_Resume&#39;
-</pre></div>
+    undefined reference to `_Unwind_Resume'
+</code></pre>
 
 <p>This function is part of Rust&rsquo;s unwinding machinery. We disabled most of by passing <code>-Z no-landing-pads</code> to rustc, but apparently some panic related code still links to it. The new “<a href="https://github.com/rust-lang/rust/issues/32837">panic as abort</a>” feature might fix this.</p>
 
@@ -339,13 +340,14 @@
 <p>This is just a temporary fix to keep this post simple. The next post will resolve this issue in a better way using a new build setup.</p>
 
 <p>Now our kernel compiles again. But when we run it, a triple fault occurs and causes permanent rebooting. We use QEMU for debugging as described <a href="http://os.phil-opp.com/remap-the-kernel.html#debugging">in the previous post</a>:</p>
-<div class="highlight"><pre><span></span>&gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
+
+<pre><code>&gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
 …
 check_exception old: 0xffffffff new 0xe
      0: v=0e e=0002 i=0 cpl=0 IP=0008:0000000000102860 pc=0000000000102860
         SP=0010:0000000000116af0 CR2=0000000040000000
 …
-</pre></div>
+</code></pre>
 
 <p>Aha! It&rsquo;s a <a href="`v=0e`">page fault</a> and was caused by the code at <code>0x102860</code>. The code tried to write (<code>e=0002</code>) to address <code>0x40000000</code>. This address is <code>0o_000_001_000_000_0000</code> in octal, which is the <code>HEAP_START</code> address defined above. Of course it page-faults: We have forgotten to map the heap memory to some physical memory.</p>
 
@@ -686,11 +688,12 @@ check_exception old: 0xffffffff new 0xe
 </code></pre></div>
 
 <p>However, we get an error when we try to compile it:</p>
-<div class="highlight"><pre><span></span><span class="n">error</span><span class="o">:</span> <span class="kd">function</span> <span class="n">calls</span> <span class="k">in</span> <span class="n">statics</span> <span class="n">are</span> <span class="n">limited</span> <span class="n">to</span> <span class="n">constant</span> <span class="n">functions</span><span class="o">,</span>
-   <span class="n">struct</span> <span class="n">and</span> <span class="n">enum</span> <span class="n">constructors</span> <span class="o">[</span><span class="n">E0015</span><span class="o">]</span>
-<span class="kd">static</span> <span class="n">HEAP</span><span class="o">:</span> <span class="n">Mutex</span><span class="o">&lt;</span><span class="n">Heap</span><span class="o">&gt;</span> <span class="o">=</span> <span class="n">Mutex</span><span class="o">::</span><span class="k">new</span><span class="o">(</span><span class="n">Heap</span><span class="o">::</span><span class="k">new</span><span class="o">(</span><span class="n">HEAP_START</span><span class="o">,</span> <span class="n">HEAP_SIZE</span><span class="o">));</span>
-                                      <span class="o">^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~</span>
-</pre></div>
+
+<pre><code>error: function calls in statics are limited to constant functions,
+   struct and enum constructors [E0015]
+static HEAP: Mutex&lt;Heap&gt; = Mutex::new(Heap::new(HEAP_START, HEAP_SIZE));
+                                      ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+</code></pre>
 
 <p>The reason is that the <code>Heap::new</code> function needs to initialize the first hole (like described <a href="#initialization">above</a>). This can&rsquo;t be done at compile time, so the function can&rsquo;t be a <code>const</code> function. Therefore we can&rsquo;t use it to initialize a static.</p>
 

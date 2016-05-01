@@ -423,8 +423,9 @@
 </table>
 
 <p>If we look closely, we can see that the P3 address is equal to <code>(P4 &lt;&lt; 9) | XXX_0000</code>. And the P2 address is calculated through <code>(P3 &lt;&lt; 9) | YYY_0000</code>. So to get the next address, we need to shift it 9 bits to the left and add the table index. As a formula:</p>
-<div class="highlight"><pre><span></span>next_table_address = (table_address &lt;&lt; 9) | (index &lt;&lt; 12)
-</pre></div>
+
+<pre><code>next_table_address = (table_address &lt;&lt; 9) | (index &lt;&lt; 12)
+</code></pre>
 
 <h3 id="the-next-table-methods">The <code>next_table</code> Methods</h3>
 
@@ -579,10 +580,11 @@
 </code></pre></div>
 
 <p>Most of the indexes are completely out of bounds, so it would panic if it&rsquo;s called. But we don&rsquo;t need to call it since it already fails at compile time:</p>
-<div class="highlight"><pre><span></span><span class="n">error</span><span class="o">:</span> <span class="n">no</span> <span class="n">method</span> <span class="n">named</span> <span class="err">`</span><span class="n">next_table</span><span class="err">`</span> <span class="n">found</span> <span class="k">for</span> <span class="n">type</span>
-  <span class="err">`</span><span class="o">&amp;</span><span class="n">memory</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">table</span><span class="o">::</span><span class="n">Table</span><span class="o">&lt;</span><span class="n">memory</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">table</span><span class="o">::</span><span class="n">Level1</span><span class="o">&gt;</span><span class="err">`</span>
-  <span class="k">in</span> <span class="n">the</span> <span class="n">current</span> <span class="n">scope</span>
-</pre></div>
+
+<pre><code>error: no method named `next_table` found for type
+  `&amp;memory::paging::table::Table&lt;memory::paging::table::Level1&gt;`
+  in the current scope
+</code></pre>
 
 <p>Remember that this is bare metal kernel code. We just used type system magic to make low-level page table manipulations safer. Rust is just awesome!</p>
 
@@ -608,10 +610,11 @@
 </code></pre></div>
 
 <p>The assertion is needed because there can be invalid addresses. Addresses on x86 are just 48-bit long and the other bits are just <em>sign extension</em>, i.e. a copy of the most significant bit. For example:</p>
-<div class="highlight"><pre><span></span>invalid address: 0x0000_8000_0000_0000
+
+<pre><code>invalid address: 0x0000_8000_0000_0000
 valid address:   0xffff_8000_0000_0000
                         └── bit 47
-</pre></div>
+</code></pre>
 
 <p>So the address space is split into two halves: the <em>higher half</em> containing addresses with sign extension and the <em>lower half</em> containing addresses without. Everything in between is invalid.</p>
 
@@ -920,19 +923,21 @@ valid address:   0xffff_8000_0000_0000
 <p>Currently, the first GiB of the address space is identity-mapped. Thus all addresses in this area should translate to <code>Some(x)</code>, where <code>x</code> is the virtual address. Only the second last address, <code>512 * 512 * 4096</code>, is not in that area and should resolve to <code>None</code>.</p>
 
 <p>But the output shows two <code>None</code> lines:</p>
-<div class="highlight"><pre><span></span>Some = Some(0)
+
+<pre><code>Some = Some(0)
 Some = Some(4096)
 Some = Some(2097152)
 Some = Some(629145600)
 None = None
 Some = None
-</pre></div>
+</code></pre>
 
 <p>The last line is wrong. But why?</p>
 
 <p>In fact, all addresses above <code>344 * 512 * 4096</code> seem to get translated to <code>None</code>. But even worse, there are some wrong translations, too. For example, on my machine <code>357 * 512 * 4096</code> translates to roughly <code>255TiB</code>:</p>
-<div class="highlight"><pre><span></span>Some(280735973961728)
-</pre></div>
+
+<pre><code>Some(280735973961728)
+</code></pre>
 
 <p>Something is terribly wrong here. But it&rsquo;s not our code.</p>
 
@@ -971,10 +976,11 @@ Some = None
 <p>We just map some random page to a free frame. To be able to borrow the page table as <code>&amp;mut</code>, we need to make it mutable.</p>
 
 <p>You should see output similar to this:</p>
-<div class="highlight"><pre><span></span>None = None, map to Frame { number: 0 }
+
+<pre><code>None = None, map to Frame { number: 0 }
 Some = Some(0)
 next free frame: Some(Frame { number: 3 })
-</pre></div>
+</code></pre>
 
 <p>It&rsquo;s frame 0 because it&rsquo;s the first frame returned by the frame allocator. Since we map the 42th P3 entry, the mapping code needs to create a P2 and a P1 table. So the next free frame returned by the allocator is frame 3.</p>
 

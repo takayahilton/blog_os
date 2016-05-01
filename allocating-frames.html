@@ -132,11 +132,12 @@
 <p>The <code>load</code> function is <code>unsafe</code> because it relies on a valid address. Since the memory tag is not required by the Multiboot specification, the <code>memory_map_tag()</code> function returns an <code>Option</code>. The <code>memory_areas()</code> function returns the desired memory area iterator.</p>
 
 <p>The output looks like this:</p>
-<div class="highlight"><pre><span></span>Hello World!
+
+<pre><code>Hello World!
 memory areas:
     start: 0x0, length: 0x9fc00
     start: 0x100000, length: 0x7ee0000
-</pre></div>
+</code></pre>
 
 <p>So we have one area from <code>0x0</code> to <code>0x9fc00</code>, which is a bit below the 1MiB mark. The second, bigger area starts at 1MiB and contains the rest of available memory. The area from <code>0x9fc00</code> to 1MiB is not available since it contains for example the VGA text buffer at <code>0xb8000</code>. This is the reason for putting our kernel at 1MiB and not somewhere below.</p>
 
@@ -183,7 +184,8 @@ memory areas:
 <p>But when we execute it, tons of really small sections are printed. We can use the <code>objdump -h build/kernel-x86_64.bin</code> command to list the sections with name. There seem to be over 200 sections and many of them start with <code>.text.*</code> or <code>.data.rel.ro.local.*</code>. This is because the Rust compiler puts e.g. each function in its own <code>.text</code> subsection. That way, unused functions are removed when the linker omits unused sections.</p>
 
 <p>To merge these subsections, we need to update our linker script:</p>
-<div class="highlight"><pre><span></span>SECTIONS {
+
+<pre><code>SECTIONS {
     . = 1M;
 
     .boot :
@@ -204,7 +206,7 @@ memory areas:
         *(.data.rel.ro.local*) *(.data.rel.ro .data.rel.ro.*)
     }
 }
-</pre></div>
+</code></pre>
 
 <p>These lines are taken from the default linker script of <code>ld</code>, which can be obtained through <code>ld ‑verbose</code>. The <code>.text</code> <em>output</em> section contains now all <code>.text.*</code> <em>input</em> sections of the static library (and the same applies for the <code>.rodata</code> and <code>.data.rel.ro</code> sections).</p>
 
@@ -229,9 +231,10 @@ memory areas:
 </code></pre></div>
 
 <p>Printing these numbers gives us:</p>
-<div class="highlight"><pre><span></span><span class="n">kernel_start</span><span class="o">:</span> <span class="mh">0x100000</span><span class="o">,</span> <span class="n">kernel_end</span><span class="o">:</span> <span class="mh">0x11a168</span>
-<span class="n">multiboot_start</span><span class="o">:</span> <span class="mh">0x11d400</span><span class="o">,</span> <span class="n">multiboot_end</span><span class="o">:</span> <span class="mh">0x11d9c8</span>
-</pre></div>
+
+<pre><code>kernel_start: 0x100000, kernel_end: 0x11a168
+multiboot_start: 0x11d400, multiboot_end: 0x11d9c8
+</code></pre>
 
 <p>So the kernel starts at 1MiB (like expected) and is about 105 KiB in size. The multiboot information structure was placed at <code>0x11d400</code> by GRUB and needs 1480 bytes. Of course your numbers could be a bit different due to different versions of Rust or GRUB (or some differences in the source code).</p>
 

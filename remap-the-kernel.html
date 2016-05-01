@@ -645,7 +645,8 @@
 <h3 id="page-align-sections">Page Align Sections</h3>
 
 <p>Right now our sections aren&rsquo;t page aligned, so the assertion in <code>remap_the_kernel</code> would fail. We can fix this by making the section size a multiple of the page size. To do this, we add an <code>ALIGN</code> statement to all sections in the linker file. For example:</p>
-<div class="highlight"><pre><span></span>SECTIONS {
+
+<pre><code>SECTIONS {
   . = 1M;
 
   .text :
@@ -654,53 +655,54 @@
     . = ALIGN(4K);
   }
 }
-</pre></div>
+</code></pre>
 
 <p>The <code>.</code> is the “current location counter” and represents the current virtual address. At the beginning of the <code>SECTIONS</code> tag we set it to <code>1M</code>, so our kernel starts at 1MiB. We use the <a href="http://www.math.utah.edu/docs/info/ld_3.html#SEC12">ALIGN</a> function to align the current location counter to the next <code>4K</code> boundary (<code>4K</code> is the page size). Thus the end of the <code>.text</code> section – and the beginning of the next section – are page aligned.</p>
 
 <p>To put all sections on their own page, we add the <code>ALIGN</code> statement to all of them:</p>
-<div class="highlight"><pre><span></span><span class="cm">/* src/arch/x86_64/linker.ld */</span><span class="w"></span>
 
-SECTIONS<span class="w"> </span><span class="err">{</span><span class="w"></span>
-<span class="w">  </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="m">1</span>M<span class="err">;</span><span class="w"></span>
+<pre><code>/* src/arch/x86_64/linker.ld */
 
-<span class="w">  </span><span class="o">.</span><span class="nl">rodata</span><span class="w"> </span><span class="o">:</span><span class="w"></span>
-<span class="w">  </span><span class="err">{</span><span class="w"></span>
-<span class="w">    </span><span class="cm">/* ensure that the multiboot header is at the beginning */</span><span class="w"></span>
-<span class="w">    </span>KEEP<span class="o">(*(.</span>multiboot_header<span class="o">))</span><span class="w"></span>
-<span class="w">    </span><span class="o">*(.</span>rodata<span class="w"> </span><span class="o">.</span>rodata<span class="o">.*)</span><span class="w"></span>
-<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
-<span class="w">  </span><span class="err">}</span><span class="w"></span>
+SECTIONS {
+  . = 1M;
 
-<span class="w">  </span><span class="o">.</span><span class="nl">text</span><span class="w"> </span><span class="o">:</span><span class="w"></span>
-<span class="w">  </span><span class="err">{</span><span class="w"></span>
-<span class="w">    </span><span class="o">*(.</span>text<span class="w"> </span><span class="o">.</span>text<span class="o">.*)</span><span class="w"></span>
-<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
-<span class="w">  </span><span class="err">}</span><span class="w"></span>
+  .rodata :
+  {
+    /* ensure that the multiboot header is at the beginning */
+    KEEP(*(.multiboot_header))
+    *(.rodata .rodata.*)
+    . = ALIGN(4K);
+  }
 
-<span class="w">  </span><span class="o">.</span><span class="nl">data</span><span class="w"> </span><span class="o">:</span><span class="w"></span>
-<span class="w">  </span><span class="err">{</span><span class="w"></span>
-<span class="w">    </span><span class="o">*(.</span>data<span class="w"> </span><span class="o">.</span>data<span class="o">.*)</span><span class="w"></span>
-<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
-<span class="w">  </span><span class="err">}</span><span class="w"></span>
+  .text :
+  {
+    *(.text .text.*)
+    . = ALIGN(4K);
+  }
 
-<span class="w">  </span><span class="o">.</span><span class="nl">bss</span><span class="w"> </span><span class="o">:</span><span class="w"></span>
-<span class="w">  </span><span class="err">{</span><span class="w"></span>
-<span class="w">    </span><span class="o">*(.</span>bss<span class="w"> </span><span class="o">.</span>bss<span class="o">.*)</span><span class="w"></span>
-<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
-<span class="w">  </span><span class="err">}</span><span class="w"></span>
+  .data :
+  {
+    *(.data .data.*)
+    . = ALIGN(4K);
+  }
 
-<span class="w">  </span><span class="o">.</span>data<span class="o">.</span>rel<span class="o">.</span><span class="nl">ro</span><span class="w"> </span><span class="o">:</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="w"> </span><span class="err">{</span><span class="w"></span>
-<span class="w">    </span><span class="o">*(.</span>data<span class="o">.</span>rel<span class="o">.</span>ro<span class="o">.</span>local<span class="o">*)</span><span class="w"> </span><span class="o">*(.</span>data<span class="o">.</span>rel<span class="o">.</span>ro<span class="w"> </span><span class="o">.</span>data<span class="o">.</span>rel<span class="o">.</span>ro<span class="o">.*)</span><span class="w"></span>
-<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
-<span class="w">  </span><span class="err">}</span><span class="w"></span>
+  .bss :
+  {
+    *(.bss .bss.*)
+    . = ALIGN(4K);
+  }
 
-<span class="w">  </span><span class="o">.</span><span class="nl">gcc_except_table</span><span class="w"> </span><span class="o">:</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="w"> </span><span class="err">{</span><span class="w"></span>
-<span class="w">    </span><span class="o">*(.</span>gcc_except_table<span class="o">)</span><span class="w"></span>
-<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
-<span class="w">  </span><span class="err">}</span><span class="w"></span>
-<span class="err">}</span><span class="w"></span>
-</pre></div>
+  .data.rel.ro : ALIGN(4K) {
+    *(.data.rel.ro.local*) *(.data.rel.ro .data.rel.ro.*)
+    . = ALIGN(4K);
+  }
+
+  .gcc_except_table : ALIGN(4K) {
+    *(.gcc_except_table)
+    . = ALIGN(4K);
+  }
+}
+</code></pre>
 
 <p>Instead of page aligning the <code>.multiboot_header</code> section, we merge it into the <code>.rodata</code> section. That way, we don&rsquo;t waste a whole page for the few bytes of the Multiboot header. We could merge it into any section, but <code>.rodata</code> fits best because it has the same flags (neither writable nor executable). The Multiboot header still needs to be at the beginning of the file, so <code>.rodata</code> must be our first section now.</p>
 
@@ -822,17 +824,19 @@ check_exception old: 0xffffffff new 0xe
 </ul>
 
 <p>So let&rsquo;s find out which function caused the exception:</p>
-<div class="highlight"><pre><span></span>objdump -d build/kernel-x86_64.bin | grep -B100 &quot;10ab97&quot;
-</pre></div>
+
+<pre><code>objdump -d build/kernel-x86_64.bin | grep -B100 &quot;10ab97&quot;
+</code></pre>
 
 <p>We disassemble our kernel and search for <code>10ab97</code>. The <code>-B100</code> option prints the 100 preceeding lines too. The output tells us the responsible function:</p>
-<div class="highlight"><pre><span></span>...
+
+<pre><code>...
 000000000010aa80 &lt;_ZN10vga_buffer6Writer10write_byte20h4601f5e405b6e89facaE&gt;:
   10aa80:	55                   	push   %rbp
   ...
   10ab93:	66 8b 55 aa          	mov    -0x56(%rbp),%dx
   10ab97:	66 89 14 48          	mov    %dx,(%rax,%rcx,2)
-</pre></div>
+</code></pre>
 
 <p>The reason for the cryptical function name is Rust&rsquo;s <a href="https://en.wikipedia.org/wiki/Name_mangling">name mangling</a>. But we can identity the <code>vga_buffer::Writer::write_byte</code> function nonetheless.</p>
 

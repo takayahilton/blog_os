@@ -83,8 +83,9 @@
 <h3 id="the-annoying-issue">The annoying issue</h3>
 
 <p>Unfortunately gdb has an issue with the switch to long mode. If we connect when the CPU is already in long mode, everything works fine. But if we use <code>make debug</code> and thus connect right at the start, we get an error when we set a breakpoint in 64-bit mode:</p>
-<div class="highlight"><pre><span></span>Remote &#39;g&#39; packet reply is too long: [a very long number]
-</pre></div>
+
+<pre><code>Remote 'g' packet reply is too long: [a very long number]
+</code></pre>
 
 <p>This issue is known <a href="http://www.cygwin.com/ml/gdb-patches/2012-03/msg00116.html">since 2012</a> but it is still not fixed. Maybe we find the reason in the <a href="https://sourceware.org/bugzilla/show_bug.cgi?id=13984#c11">issue thread</a>:</p>
 

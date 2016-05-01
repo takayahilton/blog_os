@@ -303,10 +303,11 @@
 <h3 id="cannot-move-out-of-borrowed-content">Cannot Move out of Borrowed Content</h3>
 
 <p>When we try to compile it, we get the following error:</p>
-<div class="highlight"><pre><span></span><span class="n">error</span><span class="o">:</span> <span class="n">cannot</span> <span class="n">move</span> <span class="n">out</span> <span class="n">of</span> <span class="n">borrowed</span> <span class="n">content</span> <span class="o">[</span><span class="n">E0507</span><span class="o">]</span>
-    <span class="n">color_code</span><span class="o">:</span> <span class="n">self</span><span class="o">.</span><span class="na">color_code</span><span class="o">,</span>
-                <span class="o">^~~~</span>
-</pre></div>
+
+<pre><code>error: cannot move out of borrowed content [E0507]
+    color_code: self.color_code,
+                ^~~~
+</code></pre>
 
 <p>The reason it that Rust <em>moves</em> values by default instead of copying them like other languages. And we cannot move <code>color_code</code> out of <code>self</code> because we only borrowed <code>self</code>. For more information check out the <a href="https://doc.rust-lang.org/book/ownership.html">ownership section</a> in the Rust book. To fix it, we can implement the <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html">Copy trait</a> for the <code>ColorCode</code> type by adding <code>#[derive(Clone, Copy)]</code> to its struct.</p>
 
@@ -384,10 +385,11 @@
 </code></pre></div>
 
 <p>We just move each line to the line above. Notice that the range notation (<code>..</code>) is exclusive the upper bound. But when we try to compile it, we get an borrow checker error again:</p>
-<div class="highlight"><pre><span></span><span class="n">error</span><span class="o">:</span> <span class="n">cannot</span> <span class="n">move</span> <span class="n">out</span> <span class="n">of</span> <span class="n">indexed</span> <span class="n">content</span> <span class="o">[</span><span class="n">E0507</span><span class="o">]</span>
-    <span class="n">buffer</span><span class="o">.</span><span class="na">chars</span><span class="o">[</span><span class="n">row</span><span class="o">]</span> <span class="o">=</span> <span class="n">buffer</span><span class="o">.</span><span class="na">chars</span><span class="o">[</span><span class="n">row</span> <span class="o">+</span> <span class="mi">1</span><span class="o">]</span>
-                        <span class="o">^~~~~~~~~~~~~~~~~~~~~</span>
-</pre></div>
+
+<pre><code>error: cannot move out of indexed content [E0507]
+    buffer.chars[row] = buffer.chars[row + 1]
+                        ^~~~~~~~~~~~~~~~~~~~~
+</code></pre>
 
 <p>It&rsquo;s because of Rust&rsquo;s move semantics again: We try to move out the <code>ScreenChar</code> at <code>row + 1</code>. If Rust would allow that, the array would become invalid as it would contain some valid and some moved out values. Fortunately, the <code>ScreenChar</code> type meets all criteria for the <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html">Copy trait</a>, so we can fix the problem by adding <code>#[derive(Clone, Copy)]</code> to <code>ScreenChar</code>.</p>
 

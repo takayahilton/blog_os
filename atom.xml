@@ -273,11 +273,12 @@
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;When we try to compile it using &lt;code&gt;make run&lt;/code&gt;, we get several linker errors about a function named &lt;code&gt;_Unwind_Resume&lt;/code&gt;:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;target/x86_64-unknown-linux-gnu/debug/libblog_os.a(bump_allocator-[…].0.o):
-    In function `bump_allocator::__rust_allocate&amp;#39;:
+
+&lt;pre&gt;&lt;code&gt;target/x86_64-unknown-linux-gnu/debug/libblog_os.a(bump_allocator-[…].0.o):
+    In function `bump_allocator::__rust_allocate&#39;:
 /home/…/blog_os/libs/bump_allocator/src/lib.rs:19:
-    undefined reference to `_Unwind_Resume&amp;#39;
-&lt;/pre&gt;&lt;/div&gt;
+    undefined reference to `_Unwind_Resume&#39;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;This function is part of Rust&amp;rsquo;s unwinding machinery. We disabled most of by passing &lt;code&gt;-Z no-landing-pads&lt;/code&gt; to rustc, but apparently some panic related code still links to it. The new “&lt;a href=&#34;https://github.com/rust-lang/rust/issues/32837&#34;&gt;panic as abort&lt;/a&gt;” feature might fix this.&lt;/p&gt;
 
@@ -293,13 +294,14 @@
 &lt;p&gt;This is just a temporary fix to keep this post simple. The next post will resolve this issue in a better way using a new build setup.&lt;/p&gt;
 
 &lt;p&gt;Now our kernel compiles again. But when we run it, a triple fault occurs and causes permanent rebooting. We use QEMU for debugging as described &lt;a href=&#34;http://os.phil-opp.com/remap-the-kernel.html#debugging&#34;&gt;in the previous post&lt;/a&gt;:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&amp;gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
+
+&lt;pre&gt;&lt;code&gt;&amp;gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
 …
 check_exception old: 0xffffffff new 0xe
      0: v=0e e=0002 i=0 cpl=0 IP=0008:0000000000102860 pc=0000000000102860
         SP=0010:0000000000116af0 CR2=0000000040000000
 …
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;Aha! It&amp;rsquo;s a &lt;a href=&#34;`v=0e`&#34;&gt;page fault&lt;/a&gt; and was caused by the code at &lt;code&gt;0x102860&lt;/code&gt;. The code tried to write (&lt;code&gt;e=0002&lt;/code&gt;) to address &lt;code&gt;0x40000000&lt;/code&gt;. This address is &lt;code&gt;0o_000_001_000_000_0000&lt;/code&gt; in octal, which is the &lt;code&gt;HEAP_START&lt;/code&gt; address defined above. Of course it page-faults: We have forgotten to map the heap memory to some physical memory.&lt;/p&gt;
 
@@ -640,11 +642,12 @@ check_exception old: 0xffffffff new 0xe
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;However, we get an error when we try to compile it:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;error&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;kd&#34;&gt;function&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;calls&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;in&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;statics&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;are&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;limited&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;to&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;constant&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;functions&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;,&lt;/span&gt;
-   &lt;span class=&#34;n&#34;&gt;struct&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;and&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;enum&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;constructors&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;[&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;E0015&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;]&lt;/span&gt;
-&lt;span class=&#34;kd&#34;&gt;static&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;HEAP&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;Mutex&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;&amp;lt;&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;Heap&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;&amp;gt;&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;=&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;Mutex&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;k&#34;&gt;new&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;Heap&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;k&#34;&gt;new&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;HEAP_START&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;,&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;HEAP_SIZE&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;));&lt;/span&gt;
-                                      &lt;span class=&#34;o&#34;&gt;^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;error: function calls in statics are limited to constant functions,
+   struct and enum constructors [E0015]
+static HEAP: Mutex&amp;lt;Heap&amp;gt; = Mutex::new(Heap::new(HEAP_START, HEAP_SIZE));
+                                      ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;The reason is that the &lt;code&gt;Heap::new&lt;/code&gt; function needs to initialize the first hole (like described &lt;a href=&#34;#initialization&#34;&gt;above&lt;/a&gt;). This can&amp;rsquo;t be done at compile time, so the function can&amp;rsquo;t be a &lt;code&gt;const&lt;/code&gt; function. Therefore we can&amp;rsquo;t use it to initialize a static.&lt;/p&gt;
 
@@ -1345,7 +1348,8 @@ in memory::init in src/memory/mod.rs:
 &lt;h3 id=&#34;page-align-sections&#34;&gt;Page Align Sections&lt;/h3&gt;
 
 &lt;p&gt;Right now our sections aren&amp;rsquo;t page aligned, so the assertion in &lt;code&gt;remap_the_kernel&lt;/code&gt; would fail. We can fix this by making the section size a multiple of the page size. To do this, we add an &lt;code&gt;ALIGN&lt;/code&gt; statement to all sections in the linker file. For example:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;SECTIONS {
+
+&lt;pre&gt;&lt;code&gt;SECTIONS {
   . = 1M;
 
   .text :
@@ -1354,53 +1358,54 @@ in memory::init in src/memory/mod.rs:
     . = ALIGN(4K);
   }
 }
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;The &lt;code&gt;.&lt;/code&gt; is the “current location counter” and represents the current virtual address. At the beginning of the &lt;code&gt;SECTIONS&lt;/code&gt; tag we set it to &lt;code&gt;1M&lt;/code&gt;, so our kernel starts at 1MiB. We use the &lt;a href=&#34;http://www.math.utah.edu/docs/info/ld_3.html#SEC12&#34;&gt;ALIGN&lt;/a&gt; function to align the current location counter to the next &lt;code&gt;4K&lt;/code&gt; boundary (&lt;code&gt;4K&lt;/code&gt; is the page size). Thus the end of the &lt;code&gt;.text&lt;/code&gt; section – and the beginning of the next section – are page aligned.&lt;/p&gt;
 
 &lt;p&gt;To put all sections on their own page, we add the &lt;code&gt;ALIGN&lt;/code&gt; statement to all of them:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;cm&#34;&gt;/* src/arch/x86_64/linker.ld */&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
 
-SECTIONS&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;=&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;m&#34;&gt;1&lt;/span&gt;M&lt;span class=&#34;err&#34;&gt;;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+&lt;pre&gt;&lt;code&gt;/* src/arch/x86_64/linker.ld */
 
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;nl&#34;&gt;rodata&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;cm&#34;&gt;/* ensure that the multiboot header is at the beginning */&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;KEEP&lt;span class=&#34;o&#34;&gt;(*(.&lt;/span&gt;multiboot_header&lt;span class=&#34;o&#34;&gt;))&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;*(.&lt;/span&gt;rodata&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;rodata&lt;span class=&#34;o&#34;&gt;.*)&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;=&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;ALIGN&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;m&#34;&gt;4&lt;/span&gt;K&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;&lt;span class=&#34;err&#34;&gt;;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+SECTIONS {
+  . = 1M;
 
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;nl&#34;&gt;text&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;*(.&lt;/span&gt;text&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;text&lt;span class=&#34;o&#34;&gt;.*)&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;=&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;ALIGN&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;m&#34;&gt;4&lt;/span&gt;K&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;&lt;span class=&#34;err&#34;&gt;;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+  .rodata :
+  {
+    /* ensure that the multiboot header is at the beginning */
+    KEEP(*(.multiboot_header))
+    *(.rodata .rodata.*)
+    . = ALIGN(4K);
+  }
 
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;nl&#34;&gt;data&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;*(.&lt;/span&gt;data&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;data&lt;span class=&#34;o&#34;&gt;.*)&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;=&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;ALIGN&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;m&#34;&gt;4&lt;/span&gt;K&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;&lt;span class=&#34;err&#34;&gt;;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+  .text :
+  {
+    *(.text .text.*)
+    . = ALIGN(4K);
+  }
 
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;nl&#34;&gt;bss&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;*(.&lt;/span&gt;bss&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;bss&lt;span class=&#34;o&#34;&gt;.*)&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;=&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;ALIGN&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;m&#34;&gt;4&lt;/span&gt;K&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;&lt;span class=&#34;err&#34;&gt;;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+  .data :
+  {
+    *(.data .data.*)
+    . = ALIGN(4K);
+  }
 
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;data&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;rel&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;nl&#34;&gt;ro&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;ALIGN&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;m&#34;&gt;4&lt;/span&gt;K&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;*(.&lt;/span&gt;data&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;rel&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;ro&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;local&lt;span class=&#34;o&#34;&gt;*)&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;*(.&lt;/span&gt;data&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;rel&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;ro&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;data&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;rel&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;ro&lt;span class=&#34;o&#34;&gt;.*)&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;=&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;ALIGN&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;m&#34;&gt;4&lt;/span&gt;K&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;&lt;span class=&#34;err&#34;&gt;;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+  .bss :
+  {
+    *(.bss .bss.*)
+    . = ALIGN(4K);
+  }
 
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;nl&#34;&gt;gcc_except_table&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;ALIGN&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;m&#34;&gt;4&lt;/span&gt;K&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;*(.&lt;/span&gt;gcc_except_table&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;=&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;ALIGN&lt;span class=&#34;o&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;m&#34;&gt;4&lt;/span&gt;K&lt;span class=&#34;o&#34;&gt;)&lt;/span&gt;&lt;span class=&#34;err&#34;&gt;;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;  &lt;/span&gt;&lt;span class=&#34;err&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;err&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
+  .data.rel.ro : ALIGN(4K) {
+    *(.data.rel.ro.local*) *(.data.rel.ro .data.rel.ro.*)
+    . = ALIGN(4K);
+  }
+
+  .gcc_except_table : ALIGN(4K) {
+    *(.gcc_except_table)
+    . = ALIGN(4K);
+  }
+}
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;Instead of page aligning the &lt;code&gt;.multiboot_header&lt;/code&gt; section, we merge it into the &lt;code&gt;.rodata&lt;/code&gt; section. That way, we don&amp;rsquo;t waste a whole page for the few bytes of the Multiboot header. We could merge it into any section, but &lt;code&gt;.rodata&lt;/code&gt; fits best because it has the same flags (neither writable nor executable). The Multiboot header still needs to be at the beginning of the file, so &lt;code&gt;.rodata&lt;/code&gt; must be our first section now.&lt;/p&gt;
 
@@ -1522,17 +1527,19 @@ check_exception old: 0xffffffff new 0xe
 &lt;/ul&gt;
 
 &lt;p&gt;So let&amp;rsquo;s find out which function caused the exception:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;objdump -d build/kernel-x86_64.bin | grep -B100 &amp;quot;10ab97&amp;quot;
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;objdump -d build/kernel-x86_64.bin | grep -B100 &amp;quot;10ab97&amp;quot;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;We disassemble our kernel and search for &lt;code&gt;10ab97&lt;/code&gt;. The &lt;code&gt;-B100&lt;/code&gt; option prints the 100 preceeding lines too. The output tells us the responsible function:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;...
+
+&lt;pre&gt;&lt;code&gt;...
 000000000010aa80 &amp;lt;_ZN10vga_buffer6Writer10write_byte20h4601f5e405b6e89facaE&amp;gt;:
   10aa80:	55                   	push   %rbp
   ...
   10ab93:	66 8b 55 aa          	mov    -0x56(%rbp),%dx
   10ab97:	66 89 14 48          	mov    %dx,(%rax,%rcx,2)
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;The reason for the cryptical function name is Rust&amp;rsquo;s &lt;a href=&#34;https://en.wikipedia.org/wiki/Name_mangling&#34;&gt;name mangling&lt;/a&gt;. But we can identity the &lt;code&gt;vga_buffer::Writer::write_byte&lt;/code&gt; function nonetheless.&lt;/p&gt;
 
@@ -2137,8 +2144,9 @@ check_exception old: 0xffffffff new 0xe
 &lt;/table&gt;
 
 &lt;p&gt;If we look closely, we can see that the P3 address is equal to &lt;code&gt;(P4 &amp;lt;&amp;lt; 9) | XXX_0000&lt;/code&gt;. And the P2 address is calculated through &lt;code&gt;(P3 &amp;lt;&amp;lt; 9) | YYY_0000&lt;/code&gt;. So to get the next address, we need to shift it 9 bits to the left and add the table index. As a formula:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;next_table_address = (table_address &amp;lt;&amp;lt; 9) | (index &amp;lt;&amp;lt; 12)
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;next_table_address = (table_address &amp;lt;&amp;lt; 9) | (index &amp;lt;&amp;lt; 12)
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;h3 id=&#34;the-next-table-methods&#34;&gt;The &lt;code&gt;next_table&lt;/code&gt; Methods&lt;/h3&gt;
 
@@ -2293,10 +2301,11 @@ check_exception old: 0xffffffff new 0xe
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;Most of the indexes are completely out of bounds, so it would panic if it&amp;rsquo;s called. But we don&amp;rsquo;t need to call it since it already fails at compile time:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;error&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;no&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;method&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;named&lt;/span&gt; &lt;span class=&#34;err&#34;&gt;`&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;next_table&lt;/span&gt;&lt;span class=&#34;err&#34;&gt;`&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;found&lt;/span&gt; &lt;span class=&#34;k&#34;&gt;for&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;type&lt;/span&gt;
-  &lt;span class=&#34;err&#34;&gt;`&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;&amp;amp;&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;memory&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;paging&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;table&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;Table&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;&amp;lt;&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;memory&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;paging&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;table&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;Level1&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;&amp;gt;&lt;/span&gt;&lt;span class=&#34;err&#34;&gt;`&lt;/span&gt;
-  &lt;span class=&#34;k&#34;&gt;in&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;the&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;current&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;scope&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;error: no method named `next_table` found for type
+  `&amp;amp;memory::paging::table::Table&amp;lt;memory::paging::table::Level1&amp;gt;`
+  in the current scope
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;Remember that this is bare metal kernel code. We just used type system magic to make low-level page table manipulations safer. Rust is just awesome!&lt;/p&gt;
 
@@ -2322,10 +2331,11 @@ check_exception old: 0xffffffff new 0xe
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;The assertion is needed because there can be invalid addresses. Addresses on x86 are just 48-bit long and the other bits are just &lt;em&gt;sign extension&lt;/em&gt;, i.e. a copy of the most significant bit. For example:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;invalid address: 0x0000_8000_0000_0000
+
+&lt;pre&gt;&lt;code&gt;invalid address: 0x0000_8000_0000_0000
 valid address:   0xffff_8000_0000_0000
                         └── bit 47
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;So the address space is split into two halves: the &lt;em&gt;higher half&lt;/em&gt; containing addresses with sign extension and the &lt;em&gt;lower half&lt;/em&gt; containing addresses without. Everything in between is invalid.&lt;/p&gt;
 
@@ -2634,19 +2644,21 @@ valid address:   0xffff_8000_0000_0000
 &lt;p&gt;Currently, the first GiB of the address space is identity-mapped. Thus all addresses in this area should translate to &lt;code&gt;Some(x)&lt;/code&gt;, where &lt;code&gt;x&lt;/code&gt; is the virtual address. Only the second last address, &lt;code&gt;512 * 512 * 4096&lt;/code&gt;, is not in that area and should resolve to &lt;code&gt;None&lt;/code&gt;.&lt;/p&gt;
 
 &lt;p&gt;But the output shows two &lt;code&gt;None&lt;/code&gt; lines:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;Some = Some(0)
+
+&lt;pre&gt;&lt;code&gt;Some = Some(0)
 Some = Some(4096)
 Some = Some(2097152)
 Some = Some(629145600)
 None = None
 Some = None
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;The last line is wrong. But why?&lt;/p&gt;
 
 &lt;p&gt;In fact, all addresses above &lt;code&gt;344 * 512 * 4096&lt;/code&gt; seem to get translated to &lt;code&gt;None&lt;/code&gt;. But even worse, there are some wrong translations, too. For example, on my machine &lt;code&gt;357 * 512 * 4096&lt;/code&gt; translates to roughly &lt;code&gt;255TiB&lt;/code&gt;:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;Some(280735973961728)
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;Some(280735973961728)
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;Something is terribly wrong here. But it&amp;rsquo;s not our code.&lt;/p&gt;
 
@@ -2685,10 +2697,11 @@ Some = None
 &lt;p&gt;We just map some random page to a free frame. To be able to borrow the page table as &lt;code&gt;&amp;amp;mut&lt;/code&gt;, we need to make it mutable.&lt;/p&gt;
 
 &lt;p&gt;You should see output similar to this:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;None = None, map to Frame { number: 0 }
+
+&lt;pre&gt;&lt;code&gt;None = None, map to Frame { number: 0 }
 Some = Some(0)
 next free frame: Some(Frame { number: 3 })
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;It&amp;rsquo;s frame 0 because it&amp;rsquo;s the first frame returned by the frame allocator. Since we map the 42th P3 entry, the mapping code needs to create a P2 and a P1 table. So the next free frame returned by the allocator is frame 3.&lt;/p&gt;
 
@@ -2844,11 +2857,12 @@ next free frame: Some(Frame { number: 3 })
 &lt;p&gt;The &lt;code&gt;load&lt;/code&gt; function is &lt;code&gt;unsafe&lt;/code&gt; because it relies on a valid address. Since the memory tag is not required by the Multiboot specification, the &lt;code&gt;memory_map_tag()&lt;/code&gt; function returns an &lt;code&gt;Option&lt;/code&gt;. The &lt;code&gt;memory_areas()&lt;/code&gt; function returns the desired memory area iterator.&lt;/p&gt;
 
 &lt;p&gt;The output looks like this:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;Hello World!
+
+&lt;pre&gt;&lt;code&gt;Hello World!
 memory areas:
     start: 0x0, length: 0x9fc00
     start: 0x100000, length: 0x7ee0000
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;So we have one area from &lt;code&gt;0x0&lt;/code&gt; to &lt;code&gt;0x9fc00&lt;/code&gt;, which is a bit below the 1MiB mark. The second, bigger area starts at 1MiB and contains the rest of available memory. The area from &lt;code&gt;0x9fc00&lt;/code&gt; to 1MiB is not available since it contains for example the VGA text buffer at &lt;code&gt;0xb8000&lt;/code&gt;. This is the reason for putting our kernel at 1MiB and not somewhere below.&lt;/p&gt;
 
@@ -2895,7 +2909,8 @@ memory areas:
 &lt;p&gt;But when we execute it, tons of really small sections are printed. We can use the &lt;code&gt;objdump -h build/kernel-x86_64.bin&lt;/code&gt; command to list the sections with name. There seem to be over 200 sections and many of them start with &lt;code&gt;.text.*&lt;/code&gt; or &lt;code&gt;.data.rel.ro.local.*&lt;/code&gt;. This is because the Rust compiler puts e.g. each function in its own &lt;code&gt;.text&lt;/code&gt; subsection. That way, unused functions are removed when the linker omits unused sections.&lt;/p&gt;
 
 &lt;p&gt;To merge these subsections, we need to update our linker script:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;SECTIONS {
+
+&lt;pre&gt;&lt;code&gt;SECTIONS {
     . = 1M;
 
     .boot :
@@ -2916,7 +2931,7 @@ memory areas:
         *(.data.rel.ro.local*) *(.data.rel.ro .data.rel.ro.*)
     }
 }
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;These lines are taken from the default linker script of &lt;code&gt;ld&lt;/code&gt;, which can be obtained through &lt;code&gt;ld ‑verbose&lt;/code&gt;. The &lt;code&gt;.text&lt;/code&gt; &lt;em&gt;output&lt;/em&gt; section contains now all &lt;code&gt;.text.*&lt;/code&gt; &lt;em&gt;input&lt;/em&gt; sections of the static library (and the same applies for the &lt;code&gt;.rodata&lt;/code&gt; and &lt;code&gt;.data.rel.ro&lt;/code&gt; sections).&lt;/p&gt;
 
@@ -2941,9 +2956,10 @@ memory areas:
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;Printing these numbers gives us:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;kernel_start&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;mh&#34;&gt;0x100000&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;,&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;kernel_end&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;mh&#34;&gt;0x11a168&lt;/span&gt;
-&lt;span class=&#34;n&#34;&gt;multiboot_start&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;mh&#34;&gt;0x11d400&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;,&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;multiboot_end&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;mh&#34;&gt;0x11d9c8&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;kernel_start: 0x100000, kernel_end: 0x11a168
+multiboot_start: 0x11d400, multiboot_end: 0x11d9c8
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;So the kernel starts at 1MiB (like expected) and is about 105 KiB in size. The multiboot information structure was placed at &lt;code&gt;0x11d400&lt;/code&gt; by GRUB and needs 1480 bytes. Of course your numbers could be a bit different due to different versions of Rust or GRUB (or some differences in the source code).&lt;/p&gt;
 
@@ -3415,10 +3431,11 @@ memory areas:
 &lt;h3 id=&#34;cannot-move-out-of-borrowed-content&#34;&gt;Cannot Move out of Borrowed Content&lt;/h3&gt;
 
 &lt;p&gt;When we try to compile it, we get the following error:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;error&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;cannot&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;move&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;out&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;of&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;borrowed&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;content&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;[&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;E0507&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;]&lt;/span&gt;
-    &lt;span class=&#34;n&#34;&gt;color_code&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;self&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;color_code&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;,&lt;/span&gt;
-                &lt;span class=&#34;o&#34;&gt;^~~~&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;error: cannot move out of borrowed content [E0507]
+    color_code: self.color_code,
+                ^~~~
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;The reason it that Rust &lt;em&gt;moves&lt;/em&gt; values by default instead of copying them like other languages. And we cannot move &lt;code&gt;color_code&lt;/code&gt; out of &lt;code&gt;self&lt;/code&gt; because we only borrowed &lt;code&gt;self&lt;/code&gt;. For more information check out the &lt;a href=&#34;https://doc.rust-lang.org/book/ownership.html&#34;&gt;ownership section&lt;/a&gt; in the Rust book. To fix it, we can implement the &lt;a href=&#34;https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html&#34;&gt;Copy trait&lt;/a&gt; for the &lt;code&gt;ColorCode&lt;/code&gt; type by adding &lt;code&gt;#[derive(Clone, Copy)]&lt;/code&gt; to its struct.&lt;/p&gt;
 
@@ -3496,10 +3513,11 @@ memory areas:
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;We just move each line to the line above. Notice that the range notation (&lt;code&gt;..&lt;/code&gt;) is exclusive the upper bound. But when we try to compile it, we get an borrow checker error again:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;error&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;cannot&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;move&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;out&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;of&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;indexed&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;content&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;[&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;E0507&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;]&lt;/span&gt;
-    &lt;span class=&#34;n&#34;&gt;buffer&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;chars&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;[&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;row&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;]&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;=&lt;/span&gt; &lt;span class=&#34;n&#34;&gt;buffer&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;chars&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;[&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;row&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;+&lt;/span&gt; &lt;span class=&#34;mi&#34;&gt;1&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;]&lt;/span&gt;
-                        &lt;span class=&#34;o&#34;&gt;^~~~~~~~~~~~~~~~~~~~~&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;error: cannot move out of indexed content [E0507]
+    buffer.chars[row] = buffer.chars[row + 1]
+                        ^~~~~~~~~~~~~~~~~~~~~
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;It&amp;rsquo;s because of Rust&amp;rsquo;s move semantics again: We try to move out the &lt;code&gt;ScreenChar&lt;/code&gt; at &lt;code&gt;row + 1&lt;/code&gt;. If Rust would allow that, the array would become invalid as it would contain some valid and some moved out values. Fortunately, the &lt;code&gt;ScreenChar&lt;/code&gt; type meets all criteria for the &lt;a href=&#34;https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html&#34;&gt;Copy trait&lt;/a&gt;, so we can fix the problem by adding &lt;code&gt;#[derive(Clone, Copy)]&lt;/code&gt; to &lt;code&gt;ScreenChar&lt;/code&gt;.&lt;/p&gt;
 
@@ -3791,16 +3809,17 @@ memory areas:
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;Now &lt;code&gt;make run&lt;/code&gt; doesn&amp;rsquo;t complain about &lt;code&gt;memcpy&lt;/code&gt; anymore. Instead it will show a pile of new errors:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;target/debug/libblog_os.a(core-35017696.0.o):
-    In function `ops::f32.Rem::rem::hfcbbcbe5711a6e6emxm&amp;#39;:
+
+&lt;pre&gt;&lt;code&gt;target/debug/libblog_os.a(core-35017696.0.o):
+    In function `ops::f32.Rem::rem::hfcbbcbe5711a6e6emxm&#39;:
     core.0.rs:(.text._ZN3ops7f32.Rem3rem20hfcbbcbe5711a6e6emxmE+0x1):
-    undefined reference to `fmodf&amp;#39;
+    undefined reference to `fmodf&#39;
 target/debug/libblog_os.a(core-35017696.0.o):
-    In function `ops::f64.Rem::rem::hbf225030671c7a35Txm&amp;#39;:
+    In function `ops::f64.Rem::rem::hbf225030671c7a35Txm&#39;:
     core.0.rs:(.text._ZN3ops7f64.Rem3rem20hbf225030671c7a35TxmE+0x1):
-    undefined reference to `fmod&amp;#39;
+    undefined reference to `fmod&#39;
 ...
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;h3 id=&#34;gc-sections&#34;&gt;&amp;ndash;gc-sections&lt;/h3&gt;
 
@@ -3813,16 +3832,18 @@ target/debug/libblog_os.a(core-35017696.0.o):
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;Now we can do a &lt;code&gt;make run&lt;/code&gt; again and… it doesn&amp;rsquo;t boot anymore:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;GRUB error: no multiboot header found.
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;GRUB error: no multiboot header found.
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;What happened? Well, the linker removed unused sections. And since we don&amp;rsquo;t use the Multiboot section anywhere, &lt;code&gt;ld&lt;/code&gt; removes it, too. So we need to tell the linker explicitely that it should keep this section. The &lt;code&gt;KEEP&lt;/code&gt; command does exactly that, so we add it to the linker script (&lt;code&gt;linker.ld&lt;/code&gt;):&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;na&#34;&gt;.boot&lt;/span&gt; &lt;span class=&#34;p&#34;&gt;:&lt;/span&gt;
-&lt;span class=&#34;err&#34;&gt;{&lt;/span&gt;
-    &lt;span class=&#34;err&#34;&gt;/*&lt;/span&gt; &lt;span class=&#34;nf&#34;&gt;ensure&lt;/span&gt; &lt;span class=&#34;no&#34;&gt;that&lt;/span&gt; &lt;span class=&#34;no&#34;&gt;the&lt;/span&gt; &lt;span class=&#34;no&#34;&gt;multiboot&lt;/span&gt; &lt;span class=&#34;no&#34;&gt;header&lt;/span&gt; &lt;span class=&#34;no&#34;&gt;is&lt;/span&gt; &lt;span class=&#34;no&#34;&gt;at&lt;/span&gt; &lt;span class=&#34;no&#34;&gt;the&lt;/span&gt; &lt;span class=&#34;no&#34;&gt;beginning&lt;/span&gt; &lt;span class=&#34;p&#34;&gt;*&lt;/span&gt;&lt;span class=&#34;err&#34;&gt;/&lt;/span&gt;
-    &lt;span class=&#34;nf&#34;&gt;KEEP&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;(*(.&lt;/span&gt;&lt;span class=&#34;no&#34;&gt;multiboot_header&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;))&lt;/span&gt;
-&lt;span class=&#34;err&#34;&gt;}&lt;/span&gt;
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;.boot :
+{
+    /* ensure that the multiboot header is at the beginning */
+    KEEP(*(.multiboot_header))
+}
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;Now everything should work again (the green &lt;code&gt;OKAY&lt;/code&gt;). But there is another linking issue, which is triggered by some other example code.&lt;/p&gt;
 
@@ -3834,13 +3855,14 @@ target/debug/libblog_os.a(core-35017696.0.o):
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;The error is a linker error again (hence the ugly error message):&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;target/debug/libblog_os.a(blog_os.0.o):
+
+&lt;pre&gt;&lt;code&gt;target/debug/libblog_os.a(blog_os.0.o):
     In function `blog_os::iter::Iterator::zip&amp;lt;core::iter::FlatMap&amp;lt;
         core::ops::Range&amp;lt;i32&amp;gt;, core::ops::Range&amp;lt;i32&amp;gt;, closure&amp;gt;,
-        core::ops::RangeFrom&amp;lt;i32&amp;gt;&amp;gt;&amp;#39;:
+        core::ops::RangeFrom&amp;lt;i32&amp;gt;&amp;gt;&#39;:
     /home/.../src/libcore/iter.rs:654:
-    undefined reference to `_Unwind_Resume&amp;#39;
-&lt;/pre&gt;&lt;/div&gt;
+    undefined reference to `_Unwind_Resume&#39;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;So the linker can&amp;rsquo;t find a function named &lt;code&gt;_Unwind_Resume&lt;/code&gt; that is referenced in &lt;code&gt;iter.rs:654&lt;/code&gt; in libcore. This reference is not really there at &lt;a href=&#34;https://github.com/rust-lang/rust/blob/b0ca03923359afc8df92a802b7cc1476a72fb2d0/src/libcore/iter.rs#L654&#34;&gt;line 654 of libcore&amp;rsquo;s &lt;code&gt;iter.rs&lt;/code&gt;&lt;/a&gt;. Instead, it is a compiler inserted &lt;em&gt;landing pad&lt;/em&gt;, which is used for exception handling.&lt;/p&gt;
 
@@ -3865,7 +3887,8 @@ target/debug/libblog_os.a(core-35017696.0.o):
 &lt;h3 id=&#34;debugging&#34;&gt;Debugging&lt;/h3&gt;
 
 &lt;p&gt;Such a boot loop is most likely caused by some &lt;a href=&#34;http://wiki.osdev.org/Exceptions&#34;&gt;CPU exception&lt;/a&gt;. When these exceptions aren&amp;rsquo;t handled, a &lt;a href=&#34;http://wiki.osdev.org/Triple_Fault&#34;&gt;Triple Fault&lt;/a&gt; occurs and the processor resets itself. We can look at generated CPU interrupts/exceptions using QEMU:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&amp;gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
+
+&lt;pre&gt;&lt;code&gt;&amp;gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
 SMM: enter
 ...
 SMM: after RSM
@@ -3883,7 +3906,7 @@ check_exception old: 0xd new 0xd
      SP=0010:0000000000102ff0 env-&amp;gt;regs[R_EAX]=000000000000002a
 ...
 check_exception old: 0x8 new 0xd
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;Let me first explain the QEMU arguments: The &lt;code&gt;-d int&lt;/code&gt; logs CPU interrupts to the console and the &lt;code&gt;-no-reboot&lt;/code&gt; flag closes QEMU instead of constant rebooting. But what does the cryptical output mean? I already omitted most of it as we don&amp;rsquo;t need it here. Let&amp;rsquo;s break down the rest:&lt;/p&gt;
 
@@ -3894,9 +3917,10 @@ check_exception old: 0x8 new 0xd
 &lt;/ul&gt;
 
 &lt;p&gt;So let&amp;rsquo;s look at the first exception: &lt;code&gt;old:0xffffffff&lt;/code&gt; means that the CPU wasn&amp;rsquo;t handling an interrupt when the exception occurred. The new exception has number &lt;code&gt;0x6&lt;/code&gt;. By looking at an &lt;a href=&#34;http://wiki.osdev.org/Exceptions&#34;&gt;exception table&lt;/a&gt; we learn that &lt;code&gt;0x6&lt;/code&gt; indicates a &lt;a href=&#34;http://wiki.osdev.org/Exceptions#Invalid_Opcode&#34;&gt;Invalid Opcode&lt;/a&gt; fault. So the lastly executed instruction was invalid. The register dump tells us that the current instruction was &lt;code&gt;0x1001d3&lt;/code&gt; (through &lt;code&gt;IP&lt;/code&gt;  (instruction pointer) or &lt;code&gt;pc&lt;/code&gt; (program counter)). Therefore the instruction at &lt;code&gt;0x1001d3&lt;/code&gt; seems to be invalid. We can look at it using &lt;code&gt;objdump&lt;/code&gt;:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&amp;gt; objdump -D build/kernel-x86_64.bin | grep &amp;quot;1001d3:&amp;quot;
+
+&lt;pre&gt;&lt;code&gt;&amp;gt; objdump -D build/kernel-x86_64.bin | grep &amp;quot;1001d3:&amp;quot;
 1001d3:	0f 10 05 16 01 00 00 	movups 0x116(%rip),%xmm0 ...
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;Through &lt;code&gt;objdump -D&lt;/code&gt; we disassemble our whole kernel and &lt;code&gt;grep&lt;/code&gt; picks the relevant line. The instruction at &lt;code&gt;0x1001d3&lt;/code&gt; seems to be a valid &lt;code&gt;movaps&lt;/code&gt; instruction. It&amp;rsquo;s a &lt;a href=&#34;https://en.wikipedia.org/wiki/Streaming_SIMD_Extensions&#34;&gt;SSE&lt;/a&gt; instruction that moves 128 bit between memory and SSE-registers (e.g. &lt;code&gt;xmm0&lt;/code&gt;). But why the &lt;code&gt;Invalid Opcode&lt;/code&gt; exception? The answer is hidden behind the &lt;a href=&#34;http://www.c3se.chalmers.se/Common/VTUNE-9.1/doc/users_guide/mergedProjects/analyzer_ec/mergedProjects/reference_olh/mergedProjects/instructions/instruct32_hh/vc181.htm&#34;&gt;movaps documentation&lt;/a&gt;: The section &lt;em&gt;Protected Mode Exceptions&lt;/em&gt; lists the conditions for the various exceptions. The short code of the &lt;code&gt;Invalid Opcode&lt;/code&gt; is &lt;code&gt;#UD&lt;/code&gt;. An &lt;code&gt;#UD&lt;/code&gt; exception occurs:&lt;/p&gt;
 
@@ -4747,12 +4771,13 @@ The Global Descriptor Table (GDT) was used for &lt;em&gt;Segmentation&lt;/em&gt;
 &lt;/ul&gt;
 
 &lt;p&gt;We can already &lt;em&gt;assemble&lt;/em&gt; this file (which I called &lt;code&gt;multiboot_header.asm&lt;/code&gt;) using &lt;code&gt;nasm&lt;/code&gt;. It produces a flat binary by default, so the resulting file just contains our 24 bytes (in little endian if you work on a x86 machine):&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&amp;gt; nasm multiboot_header.asm
+
+&lt;pre&gt;&lt;code&gt;&amp;gt; nasm multiboot_header.asm
 &amp;gt; hexdump -x multiboot_header
 0000000    50d6    e852    0000    0000    0018    0000    af12    17ad
 0000010    0000    0000    0008    0000
 0000018
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;h2 id=&#34;the-boot-code&#34;&gt;The Boot Code&lt;/h2&gt;
 
@@ -4778,7 +4803,8 @@ The Global Descriptor Table (GDT) was used for &lt;em&gt;Segmentation&lt;/em&gt;
 &lt;/ul&gt;
 
 &lt;p&gt;Through assembling, viewing and disassembling we can see the CPU &lt;a href=&#34;https://en.wikipedia.org/wiki/Opcode&#34;&gt;Opcodes&lt;/a&gt; in action:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&amp;gt; nasm boot.asm
+
+&lt;pre&gt;&lt;code&gt;&amp;gt; nasm boot.asm
 &amp;gt; hexdump -x boot
 0000000    05c7    8000    000b    2f4b    2f4f    00f4
 000000b
@@ -4786,14 +4812,15 @@ The Global Descriptor Table (GDT) was used for &lt;em&gt;Segmentation&lt;/em&gt;
 00000000  C70500800B004B2F  mov dword [dword 0xb8000],0x2f4b2f4f
          -4F2F
 0000000A  F4                hlt
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;h2 id=&#34;building-the-executable&#34;&gt;Building the Executable&lt;/h2&gt;
 
 &lt;p&gt;To boot our executable later through GRUB, it should be an &lt;a href=&#34;https://en.wikipedia.org/wiki/Executable_and_Linkable_Format&#34;&gt;ELF&lt;/a&gt; executable. So we want &lt;code&gt;nasm&lt;/code&gt; to create ELF &lt;a href=&#34;http://wiki.osdev.org/Object_Files&#34;&gt;object files&lt;/a&gt; instead of plain binaries. To do that, we simply pass the &lt;code&gt;‑f elf64&lt;/code&gt; argument to it.&lt;/p&gt;
 
 &lt;p&gt;To create the ELF &lt;em&gt;executable&lt;/em&gt;, we need to &lt;a href=&#34;https://en.wikipedia.org/wiki/Linker_(computing)&#34;&gt;link&lt;/a&gt; the object files together. We use a custom &lt;a href=&#34;https://sourceware.org/binutils/docs/ld/Scripts.html&#34;&gt;linker script&lt;/a&gt; named &lt;code&gt;linker.ld&lt;/code&gt;:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;ENTRY(start)
+
+&lt;pre&gt;&lt;code&gt;ENTRY(start)
 
 SECTIONS {
     . = 1M;
@@ -4809,7 +4836,7 @@ SECTIONS {
         *(.text)
     }
 }
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;Let&amp;rsquo;s translate it:&lt;/p&gt;
 
@@ -4822,15 +4849,17 @@ SECTIONS {
 &lt;/ul&gt;
 
 &lt;p&gt;So let&amp;rsquo;s create the ELF object files and link them using our new linker script:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&amp;gt; nasm -f elf64 multiboot_header.asm
+
+&lt;pre&gt;&lt;code&gt;&amp;gt; nasm -f elf64 multiboot_header.asm
 &amp;gt; nasm -f elf64 boot.asm
 &amp;gt; ld -n -o kernel.bin -T linker.ld multiboot_header.o boot.o
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;It&amp;rsquo;s important to pass the &lt;code&gt;-n&lt;/code&gt; (or &lt;code&gt;--nmagic&lt;/code&gt;) flag to the linker, which disables the automatic section alignment in the executable. Otherwise the linker may page align the &lt;code&gt;.boot&lt;/code&gt; section in the executable file. If that happens, GRUB isn&amp;rsquo;t able to find the Multiboot header because it isn&amp;rsquo;t at the beginning anymore.&lt;/p&gt;
 
 &lt;p&gt;We can use &lt;code&gt;objdump&lt;/code&gt; to print the sections of the generated executable and verify that the &lt;code&gt;.boot&lt;/code&gt; section has a low file offset:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&amp;gt; objdump -h kernel.bin
+
+&lt;pre&gt;&lt;code&gt;&amp;gt; objdump -h kernel.bin
 kernel.bin:     file format elf64-x86-64
 
 Sections:
@@ -4839,33 +4868,37 @@ Idx Name      Size      VMA               LMA               File off  Algn
               CONTENTS, ALLOC, LOAD, READONLY, DATA
   1 .text     0000000b  0000000000100020  0000000000100020  000000a0  2**4
               CONTENTS, ALLOC, LOAD, READONLY, CODE
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;&lt;em&gt;Note&lt;/em&gt;: The &lt;code&gt;ld&lt;/code&gt; and &lt;code&gt;objdump&lt;/code&gt; commands are platform specific. If you&amp;rsquo;re &lt;em&gt;not&lt;/em&gt; working on x86_64 architecture, you will need to &lt;a href=&#34;http://os.phil-opp.com/cross-compile-binutils.html&#34;&gt;cross compile binutils&lt;/a&gt;. Then use &lt;code&gt;x86_64‑elf‑ld&lt;/code&gt; and &lt;code&gt;x86_64‑elf‑objdump&lt;/code&gt; instead of &lt;code&gt;ld&lt;/code&gt; and &lt;code&gt;objdump&lt;/code&gt;.&lt;/p&gt;
 
 &lt;h2 id=&#34;creating-the-iso&#34;&gt;Creating the ISO&lt;/h2&gt;
 
 &lt;p&gt;The last step is to create a bootable ISO image with GRUB. We need to create the following directory structure and copy the &lt;code&gt;kernel.bin&lt;/code&gt; to the right place:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;isofiles
+
+&lt;pre&gt;&lt;code&gt;isofiles
 └── boot
     ├── grub
     │   └── grub.cfg
     └── kernel.bin
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;The &lt;code&gt;grub.cfg&lt;/code&gt; specifies the file name of our kernel and its Multiboot 2 compliance. It looks like this:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;set timeout=0
+
+&lt;pre&gt;&lt;code&gt;set timeout=0
 set default=0
 
 menuentry &amp;quot;my os&amp;quot; {
     multiboot2 /boot/kernel.bin
     boot
 }
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;Now we can create a bootable image using the command:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;grub-mkrescue -o os.iso isofiles
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;grub-mkrescue -o os.iso isofiles
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;&lt;em&gt;Note&lt;/em&gt;: &lt;code&gt;grub-mkrescue&lt;/code&gt; causes problems on some platforms. If it does not work for you, try the following steps:&lt;/p&gt;
 
@@ -4879,8 +4912,9 @@ menuentry &amp;quot;my os&amp;quot; {
 &lt;h2 id=&#34;booting&#34;&gt;Booting&lt;/h2&gt;
 
 &lt;p&gt;Now it&amp;rsquo;s time to boot our OS. We will use &lt;a href=&#34;https://en.wikipedia.org/wiki/QEMU&#34;&gt;QEMU&lt;/a&gt;:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;qemu-system-x86_64 -cdrom os.iso
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;qemu-system-x86_64 -cdrom os.iso
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;&lt;img src=&#34;http://os.phil-opp.com/images/qemu-ok.png&#34; alt=&#34;qemu output&#34; /&gt;&lt;/p&gt;
 
@@ -4901,7 +4935,8 @@ menuentry &amp;quot;my os&amp;quot; {
 &lt;h2 id=&#34;build-automation&#34;&gt;Build Automation&lt;/h2&gt;
 
 &lt;p&gt;Right now we need to execute 4 commands in the right order everytime we change a file. That&amp;rsquo;s bad. So let&amp;rsquo;s automate the build using a &lt;a href=&#34;http://mrbook.org/blog/tutorials/make/&#34;&gt;Makefile&lt;/a&gt;. But first we should create some clean directory structure for our source files to separate the architecture specific files:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;…
+
+&lt;pre&gt;&lt;code&gt;…
 ├── Makefile
 └── src
     └── arch
@@ -4910,7 +4945,7 @@ menuentry &amp;quot;my os&amp;quot; {
             ├── boot.asm
             ├── linker.ld
             └── grub.cfg
-&lt;/pre&gt;&lt;/div&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;The Makefile looks like this (indented with tabs instead of spaces):&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-Makefile&#34; data-lang=&#34;Makefile&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;nv&#34;&gt;arch&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;?=&lt;/span&gt; x86_64
@@ -5123,8 +5158,9 @@ rm -r core/src
 &lt;h3 id=&#34;the-annoying-issue&#34;&gt;The annoying issue&lt;/h3&gt;
 
 &lt;p&gt;Unfortunately gdb has an issue with the switch to long mode. If we connect when the CPU is already in long mode, everything works fine. But if we use &lt;code&gt;make debug&lt;/code&gt; and thus connect right at the start, we get an error when we set a breakpoint in 64-bit mode:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;Remote &amp;#39;g&amp;#39; packet reply is too long: [a very long number]
-&lt;/pre&gt;&lt;/div&gt;
+
+&lt;pre&gt;&lt;code&gt;Remote &#39;g&#39; packet reply is too long: [a very long number]
+&lt;/code&gt;&lt;/pre&gt;
 
 &lt;p&gt;This issue is known &lt;a href=&#34;http://www.cygwin.com/ml/gdb-patches/2012-03/msg00116.html&#34;&gt;since 2012&lt;/a&gt; but it is still not fixed. Maybe we find the reason in the &lt;a href=&#34;https://sourceware.org/bugzilla/show_bug.cgi?id=13984#c11&#34;&gt;issue thread&lt;/a&gt;:&lt;/p&gt;
 
