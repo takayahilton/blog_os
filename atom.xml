@@ -3375,7 +3375,7 @@ multiboot_start: 0x11d400, multiboot_end: 0x11d9c8
 &lt;span class=&#34;p&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
-&lt;p&gt;Since the field ordering in default structs is undefined in Rust, we need the &lt;a href=&#34;https://doc.rust-lang.org/nightly/nomicon/other-reprs.html#reprc&#34;&gt;repr&amp;copy;&lt;/a&gt; attribute. It guarantees that the struct&amp;rsquo;s fields are laid out exactly like in a C struct and thus guarantees the correct field ordering.&lt;/p&gt;
+&lt;p&gt;Since the field ordering in default structs is undefined in Rust, we need the &lt;a href=&#34;https://doc.rust-lang.org/nightly/nomicon/other-reprs.html#reprc&#34;&gt;repr(C)&lt;/a&gt; attribute. It guarantees that the struct&amp;rsquo;s fields are laid out exactly like in a C struct and thus guarantees the correct field ordering.&lt;/p&gt;
 
 &lt;p&gt;To actually write to screen, we now create a writer type:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;k&#34;&gt;pub&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;k&#34;&gt;struct&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;n&#34;&gt;Writer&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;p&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
