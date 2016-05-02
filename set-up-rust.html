@@ -249,20 +249,9 @@ target/debug/libblog_os.a(core-35017696.0.o):
 	@cargo rustc --target <span class="k">$(</span>target<span class="k">)</span> -- -Z no-landing-pads
 </code></pre></div>
 
-<p>Now we fixed all linking issues.</p>
+<p>Now we fixed all linking issues and our kernel should <em>build</em> again. But instead of displaying <code>Hello World</code>, it constantly reboots itself when we start it.</p>
 
-<p>(For completeness, there is another flag you should pass to <code>rustc</code> as soon as you enable interrupts: <code>-C no-redzone</code>. For more information see the <a href="https://github.com/phil-opp/blog_os/issues/10">Github issue</a>).</p>
-
-<h2 id="the-final-problem">The final problem</h2>
-
-<p>Unfortunately there is one last problem left, that gets triggered by the following code:</p>
-<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="s">&quot;hello&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">42</span><span class="p">);</span><span class="w"></span>
-<span class="n">a</span><span class="p">.</span><span class="mi">1</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
-</code></pre></div>
-
-<p>When we add that code to <code>rust_main</code> and test it using <code>make run</code>, the OS will constantly reboot itself. Let&rsquo;s try to debug it.</p>
-
-<h3 id="debugging">Debugging</h3>
+<h2 id="debugging-the-boot-loop">Debugging the Boot Loop</h2>
 
 <p>Such a boot loop is most likely caused by some <a href="http://wiki.osdev.org/Exceptions">CPU exception</a>. When these exceptions aren&rsquo;t handled, a <a href="http://wiki.osdev.org/Triple_Fault">Triple Fault</a> occurs and the processor resets itself. We can look at generated CPU interrupts/exceptions using QEMU:</p>
 
@@ -272,16 +261,16 @@ SMM: enter
 SMM: after RSM
 ...
 check_exception old: 0xffffffff new 0x6
-     0: v=06 e=0000 i=0 cpl=0 IP=0008:00000000001001d3 pc=00000000001001d3
-     SP=0010:0000000000102ff0 env-&gt;regs[R_EAX]=000000000000002a
+     0: v=06 e=0000 i=0 cpl=0 IP=0008:000000000010018a pc=000000000010018a
+     SP=0010:0000000000102f70 env-&gt;regs[R_EAX]=0000000080010010
 ...
 check_exception old: 0xffffffff new 0xd
-     1: v=0d e=0062 i=0 cpl=0 IP=0008:00000000001001d3 pc=00000000001001d3
-     SP=0010:0000000000102ff0 env-&gt;regs[R_EAX]=000000000000002a
+     1: v=0d e=0062 i=0 cpl=0 IP=0008:000000000010018a pc=000000000010018a
+     SP=0010:0000000000102f70 env-&gt;regs[R_EAX]=0000000080010010
 ...
 check_exception old: 0xd new 0xd
-     2: v=08 e=0000 i=0 cpl=0 IP=0008:00000000001001d3 pc=00000000001001d3
-     SP=0010:0000000000102ff0 env-&gt;regs[R_EAX]=000000000000002a
+     2: v=08 e=0000 i=0 cpl=0 IP=0008:000000000010018a pc=000000000010018a
+     SP=0010:0000000000102f70 env-&gt;regs[R_EAX]=0000000080010010
 ...
 check_exception old: 0x8 new 0xd
 </code></pre>
@@ -289,21 +278,21 @@ check_exception old: 0x8 new 0xd
 <p>Let me first explain the QEMU arguments: The <code>-d int</code> logs CPU interrupts to the console and the <code>-no-reboot</code> flag closes QEMU instead of constant rebooting. But what does the cryptical output mean? I already omitted most of it as we don&rsquo;t need it here. Let&rsquo;s break down the rest:</p>
 
 <ul>
-<li>The first two blocks, <code>SMM: enter</code> and <code>SMM: after RSM</code> are created before our OS boots, so we just ignore them.</li>
-<li>The next block, <code>check_exception old: 0xffffffff new 0x6</code> is the interesting one. It says: “a new CPU exception with number <code>0x6</code> occurred“.</li>
+<li>The <code>SMM: enter</code> and <code>SMM: after RSM</code> blocks are created before our OS boots, so we just ignore them.</li>
+<li>The <code>check_exception old: 0xffffffff new 0x6</code> block is the interesting one. It says: “a new CPU exception with number <code>0x6</code> occurred“.</li>
 <li>The last blocks indicate further exceptions. They were thrown because we didn&rsquo;t handle the <code>0x6</code> exception, so we&rsquo;re going to ignore them, too.</li>
 </ul>
 
-<p>So let&rsquo;s look at the first exception: <code>old:0xffffffff</code> means that the CPU wasn&rsquo;t handling an interrupt when the exception occurred. The new exception has number <code>0x6</code>. By looking at an <a href="http://wiki.osdev.org/Exceptions">exception table</a> we learn that <code>0x6</code> indicates a <a href="http://wiki.osdev.org/Exceptions#Invalid_Opcode">Invalid Opcode</a> fault. So the lastly executed instruction was invalid. The register dump tells us that the current instruction was <code>0x1001d3</code> (through <code>IP</code>  (instruction pointer) or <code>pc</code> (program counter)). Therefore the instruction at <code>0x1001d3</code> seems to be invalid. We can look at it using <code>objdump</code>:</p>
+<p>So let&rsquo;s look at the first exception: <code>old:0xffffffff</code> means that the CPU wasn&rsquo;t handling an interrupt when the exception occurred. The new exception has number <code>0x6</code>. By looking at an <a href="http://wiki.osdev.org/Exceptions">exception table</a> we learn that <code>0x6</code> indicates a <a href="http://wiki.osdev.org/Exceptions#Invalid_Opcode">Invalid Opcode</a> fault. So the lastly executed instruction was invalid. The register dump tells us that the current instruction was <code>0x10018a</code> (through <code>IP</code>  (instruction pointer) or <code>pc</code> (program counter)). Therefore the instruction at <code>0x10018a</code> seems to be invalid. We can look at it using <code>objdump</code>:</p>
 
-<pre><code>&gt; objdump -D build/kernel-x86_64.bin | grep &quot;1001d3:&quot;
-1001d3:	0f 10 05 16 01 00 00 	movups 0x116(%rip),%xmm0 ...
+<pre><code>&gt; objdump -D build/kernel-x86_64.bin | grep &quot;10018a:&quot;
+10018a:	0f 10 05 c7 01 00 00 	movups 0x1c7(%rip),%xmm0 ...
 </code></pre>
 
-<p>Through <code>objdump -D</code> we disassemble our whole kernel and <code>grep</code> picks the relevant line. The instruction at <code>0x1001d3</code> seems to be a valid <code>movaps</code> instruction. It&rsquo;s a <a href="https://en.wikipedia.org/wiki/Streaming_SIMD_Extensions">SSE</a> instruction that moves 128 bit between memory and SSE-registers (e.g. <code>xmm0</code>). But why the <code>Invalid Opcode</code> exception? The answer is hidden behind the <a href="http://www.c3se.chalmers.se/Common/VTUNE-9.1/doc/users_guide/mergedProjects/analyzer_ec/mergedProjects/reference_olh/mergedProjects/instructions/instruct32_hh/vc181.htm">movaps documentation</a>: The section <em>Protected Mode Exceptions</em> lists the conditions for the various exceptions. The short code of the <code>Invalid Opcode</code> is <code>#UD</code>. An <code>#UD</code> exception occurs:</p>
+<p>Through <code>objdump -D</code> we disassemble our whole kernel and <code>grep</code> picks the relevant line. The instruction at <code>0x10018a</code> seems to be a valid <code>movaps</code> instruction. It&rsquo;s a <a href="https://en.wikipedia.org/wiki/Streaming_SIMD_Extensions">SSE</a> instruction that moves 128 bit between memory and SSE-registers (e.g. <code>xmm0</code>). But why the <code>Invalid Opcode</code> exception? The answer is hidden behind the <a href="http://www.c3se.chalmers.se/Common/VTUNE-9.1/doc/users_guide/mergedProjects/analyzer_ec/mergedProjects/reference_olh/mergedProjects/instructions/instruct32_hh/vc181.htm">movaps documentation</a>: The section <em>Protected Mode Exceptions</em> lists the conditions for the various exceptions. The short code of the <code>Invalid Opcode</code> is <code>#UD</code>. An <code>#UD</code> exception occurs:</p>
 
 <blockquote>
-<p>For an unmasked Streaming SIMD Extensions 2 instructions numeric exception (CR4.OSXMMEXCPT =0). If EM in CR0 is set. If OSFXSR in CR4 is 0. If CPUID feature flag SSE2 is 0.</p>
+<p>If an unmasked SIMD floating-point exception and OSXMMEXCPT in CR4 is 0. If EM in CR0 is set. If OSFXSR in CR4 is 0. If CPUID feature flag SSE is 0.</p>
 </blockquote>
 
 <p>The rough translation of this cryptic definition is: <em>If SSE isn&rsquo;t enabled</em>. So apparently Rust uses SSE instructions by default and we didn&rsquo;t enable SSE before. To fix this, we can either disable SSE instructions in the compiler or enable SSE in our kernel. We do the latter, as it&rsquo;s easier.</p>
