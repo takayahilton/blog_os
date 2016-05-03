@@ -259,7 +259,9 @@
 <p>Since the field ordering in default structs is undefined in Rust, we need the <a href="https://doc.rust-lang.org/nightly/nomicon/other-reprs.html#reprc">repr(C)</a> attribute. It guarantees that the struct&rsquo;s fields are laid out exactly like in a C struct and thus guarantees the correct field ordering.</p>
 
 <p>To actually write to screen, we now create a writer type:</p>
-<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">ptr</span><span class="o">::</span><span class="n">Unique</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">    </span><span class="n">column_position</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
 <span class="w">    </span><span class="n">color_code</span><span class="o">:</span><span class="w"> </span><span class="n">ColorCode</span><span class="p">,</span><span class="w"></span>
 <span class="w">    </span><span class="n">buffer</span><span class="o">:</span><span class="w"> </span><span class="n">Unique</span><span class="o">&lt;</span><span class="n">Buffer</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
@@ -368,6 +370,7 @@
 
 <p>Now we can use Rust&rsquo;s built-in <code>write!</code>/<code>writeln!</code> formatting macros:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in the `print_something` function</span>
+<span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">fmt</span><span class="o">::</span><span class="n">Write</span><span class="p">;</span><span class="w"></span>
 <span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">writer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="p">{...};</span><span class="w"></span>
 <span class="n">writer</span><span class="p">.</span><span class="n">write_byte</span><span class="p">(</span><span class="sc">b&#39;H&#39;</span><span class="p">);</span><span class="w"></span>
 <span class="n">writer</span><span class="p">.</span><span class="n">write_str</span><span class="p">(</span><span class="s">&quot;ello! &quot;</span><span class="p">);</span><span class="w"></span>
