@@ -706,15 +706,19 @@ static HEAP: Mutex&lt;Heap&gt; = Mutex::new(Heap::new(HEAP_START, HEAP_SIZE));
 
 <p>The reason is that the <code>Heap::new</code> function needs to initialize the first hole (like described <a href="#initialization">above</a>). This can&rsquo;t be done at compile time, so the function can&rsquo;t be a <code>const</code> function. Therefore we can&rsquo;t use it to initialize a static.</p>
 
-<p>There is an easy solution for crates with access to the standard library: <a href="https://github.com/rust-lang-nursery/lazy-static.rs">lazy-static</a>. It automatically initializes the static when it&rsquo;s used the first time. However, it relies on the <code>std::sync::once</code> module and is thus unusable in our kernel. I couldn&rsquo;t find any alternatives for <code>#![no_std]</code> crates, so I&rsquo;ve tried to port it. The results are part of the <a href="https://crates.io/crates/once">once</a> crate, which we already used above. I&rsquo;ve created it quite recently and haven&rsquo;t tested it much, so be careful when using it. Please <a href="https://github.com/phil-opp/rust-once/issues">report</a> any issues you find!</p>
+<p>There is an easy solution for crates with access to the standard library: <a href="https://github.com/rust-lang-nursery/lazy-static.rs">lazy_static</a>. It automatically initializes the static when it&rsquo;s used the first time. By default, it relies on the <code>std::sync::once</code> module and is thus unusable in our kernel. Fortunately it has a <code>spin_no_std</code> feature for <code>no_std</code> projects.</p>
 
-<p>Let&rsquo;s use the ported <code>lazy_static!</code> macro to fix our <code>hole_list_allocator</code>:</p>
-<div class="highlight"><pre><code class="language-shell" data-lang="shell"><span></span>&gt; cargo add once
+<p>So let&rsquo;s use the <code>lazy_static!</code> macro to fix our <code>hole_list_allocator</code>:</p>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="c1"># in libs/hole_list_allocator/Cargo.toml</span>
+
+<span class="p">[</span><span class="n">dependencies</span><span class="p">.</span><span class="n">lazy_static</span><span class="p">]</span>
+<span class="n">version</span> <span class="o">=</span> <span class="s">&quot;0.2.1&quot;</span>
+<span class="n">features</span> <span class="o">=</span> <span class="p">[</span><span class="s">&quot;spin_no_std&quot;</span><span class="p">]</span>
 </code></pre></div>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/hole_list_allocator/src/lib.rs</span>
 
 <span class="cp">#[macro_use]</span><span class="w"></span>
-<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="kr">once</span><span class="p">;</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">lazy_static</span><span class="p">;</span><span class="w"></span>
 
 <span class="n">lazy_static</span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">ref</span><span class="w"> </span><span class="n">HEAP</span><span class="o">:</span><span class="w"> </span><span class="n">Mutex</span><span class="o">&lt;</span><span class="n">Heap</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Mutex</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
