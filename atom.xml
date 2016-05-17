@@ -733,7 +733,7 @@ static HEAP: Mutex&amp;lt;Heap&amp;gt; = Mutex::new(Heap::new(HEAP_START, HEAP_S
 in memory::init in src/memory/mod.rs:
 
 &lt;span class=&#34;gd&#34;&gt;-use bump_allocator::{HEAP_START, HEAP_SIZE};&lt;/span&gt;
-&lt;span class=&#34;gi&#34;&gt;+use linked_list_allocator::{HEAP_START, HEAP_SIZE};&lt;/span&gt;
+&lt;span class=&#34;gi&#34;&gt;+use hole_list_allocator::{HEAP_START, HEAP_SIZE};&lt;/span&gt;
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;Our kernel uses the new allocator now, so we can deallocate memory without leaking it. The example from above should work now without causing an OOM situation:&lt;/p&gt;
