@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <meta http-equiv="X-Frame-Options" content="sameorigin">
+  
+  
+
+  <title>
+    Catching Exceptions &middot; Writing an OS in Rust
+  </title>
+
+  <link rel="canonical" href="http://os.phil-opp.com/catching-exceptions.html">
+
+  
+  <link rel="stylesheet" href="/css/poole.css">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/syntax.css">
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/images/apple-touch-icon-precomposed.png">
+  <link rel="shortcut icon" href="/images/favicon.ico">
+
+  
+
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/anchor-js/2.0.0/anchor.min.js"></script>
+  <script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-65296949-1', 'auto');
+  ga('send', 'pageview');
+
+</script>
+
+
+  
+  <script type="text/javascript">
+    if (window.location.hostname == "phil-opp.github.io") {
+      window.location.href = "http://os.phil-opp.com/";
+    }
+  </script>
+</head>
+
+<body>
+<div class="container content">
+
+<header class="masthead">
+  <h3 class="masthead-title">
+    <a href="/" title="Home">Writing an OS in Rust</a>
+    <span class="navigation">
+      <small><a href="/atom.xml"><img src="/images/feed-icon.png" alt="RSS"></a></small>
+    </span>
+    <small>Philipp&nbsp;Oppermann's&nbsp;blog</small>
+  </h3>
+</header>
+
+<main>
+
+
+<article class="post">
+  <h1 class="post-title">Catching Exceptions</h1>
+  <time datetime="2016-05-28" class="post-date">
+    May 28, 2016
+    
+  </time>
+
+  
+
+<p>In this post, we start exploring exceptions. We set up an interrupt descriptor table and add handler functions. At the end of this post, our kernel will be able to catch page faults.</p>
+
+<p>As always, the complete source code is on <a href="https://github.com/phil-opp/blog_os/tree/catching_exceptions">Github</a>. Please file <a href="https://github.com/phil-opp/blog_os/issues">issues</a> for any problems, questions, or improvement suggestions. There is also a comment section at the end of this page.</p>
+
+<h2 id="exceptions">Exceptions</h2>
+
+<p>An exception signals that something is wrong with the current instruction. For example, the CPU issues an exception if the current instruction tries to divide by 0. When an exception occurs, the CPU interrupts its current work and immediately calls a specific exception handler function, depending on the exception type.</p>
+
+<p>We&rsquo;ve already seen several types of exceptions in our kernel:</p>
+
+<ul>
+<li><strong>Invalid Opcode</strong>: This exception occurs when the current instruction is invalid. For example, this exception occurred when we tried to use SSE instructions before enabling SSE. Without SSE, the CPU didn&rsquo;t know the <code>movups</code> and <code>movaps</code> instructions, so it throws an exception when it stumbles over them.</li>
+<li><strong>Page Fault</strong>: A page fault occurs on illegal memory accesses. For example, if the current instruction tries to read from an unmapped page or tries to write to a read-only page.</li>
+<li><strong>Double Fault</strong>: When an exception occurs, the CPU tries to call the corresponding handler function. If another exception exception occurs <em>while calling the exception handler</em>, the CPU raises a double fault exception. This exception also occurs when there is no handler function registered for an exception.</li>
+<li><strong>Triple Fault</strong>: If an exception occurs while the CPU tries to call the double fault handler function, it issues a fatal <em>triple fault</em>. We can&rsquo;t catch or handle a triple fault. Most processors react by resetting themselves and rebooting the operating system. This causes the bootloops we experienced in the previous posts.</li>
+</ul>
+
+<p>For the full list of exceptions check out the <a href="http://wiki.osdev.org/Exceptions">OSDev wiki</a>.</p>
+
+<h3 id="the-interrupt-descriptor-table">The Interrupt Descriptor Table</h3>
+
+<p>In order to catch and handle exceptions, we have to set up a so-called <em>Interrupt Descriptor Table</em> (IDT). In this table we can specify a handler function for each CPU exception. The hardware uses this table directly, so we need to follow a predefined format. Each entry must have the following 16-byte structure:</p>
+
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td>u16</td>
+<td>Function Pointer [0:15]</td>
+<td>The lower bits of the pointer to the handler function.</td>
+</tr>
+
+<tr>
+<td>u16</td>
+<td>GDT selector</td>
+<td>Selector of a code segment in the GDT.</td>
+</tr>
+
+<tr>
+<td>u16</td>
+<td>Options</td>
+<td>(see below)</td>
+</tr>
+
+<tr>
+<td>u16</td>
+<td>Function Pointer [16:31]</td>
+<td>The middle bits of the pointer to the handler function.</td>
+</tr>
+
+<tr>
+<td>u32</td>
+<td>Function Pointer [32:63]</td>
+<td>The remaining bits of the pointer to the handler function.</td>
+</tr>
+
+<tr>
+<td>u32</td>
+<td>Reserved</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+
+<p>The options field has the following format:</p>
+
+<table>
+<thead>
+<tr>
+<th>Bits</th>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td>0-2</td>
+<td>Interrupt Stack Table Index</td>
+<td>0: Don&rsquo;t switch stacks, 1-7: Switch to the n-th stack in the Interrupt Stack Table when this handler is called.</td>
+</tr>
+
+<tr>
+<td>3-7</td>
+<td>Reserved</td>
+<td></td>
+</tr>
+
+<tr>
+<td>8</td>
+<td>0: Interrupt Gate, 1: Trap Gate</td>
+<td>If this bit is 0, interrupts are disabled when this handler is called.</td>
+</tr>
+
+<tr>
+<td>9-11</td>
+<td>must be one</td>
+<td></td>
+</tr>
+
+<tr>
+<td>12</td>
+<td>must be zero</td>
+<td></td>
+</tr>
+
+<tr>
+<td>13‑14</td>
+<td>Descriptor Privilege Level (DPL)</td>
+<td>The minimal privilege level required for calling this handler.</td>
+</tr>
+
+<tr>
+<td>15</td>
+<td>Present</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+
+<p>Each exception has a predefined IDT index. For example the invalid opcode exception has table index 6 and the page fault exception has table index 14. Thus, the hardware can automatically load the corresponding IDT entry for each exception. The <a href="http://wiki.osdev.org/Exceptions">Exception Table</a> in the OSDev wiki shows the IDT indexes of all exceptions in the “Vector nr.” column.</p>
+
+<p>When an exception occurs, the CPU roughly does the following:</p>
+
+<ol>
+<li>Read the corresponding entry from the Interrupt Descriptor Table (IDT). For example, the CPU reads the 14-th entry when a page fault occurs.</li>
+<li>Check if the entry is present. Raise a double fault if not.</li>
+<li>Push some registers on the stack, including the instruction pointer and the <a href="https://en.wikipedia.org/wiki/FLAGS_register">EFLAGS</a> register. (We will use these values in a future post.)</li>
+<li>Disable interrupts if the entry is an interrupt gate (bit 40 not set).</li>
+<li>Load the specified GDT selector into the CS segment.</li>
+<li>Jump to the specified handler function.</li>
+</ol>
+
+<h2 id="handling-exceptions">Handling Exceptions</h2>
+
+<p>Let&rsquo;s try to catch and handle CPU exceptions. We start by creating a new <code>interrupts</code> module with an <code>idt</code> submodule:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+<span class="p">...</span><span class="w"></span>
+<span class="kn">mod</span><span class="w"> </span><span class="n">interrupts</span><span class="p">;</span><span class="w"></span>
+<span class="p">...</span><span class="w"></span>
+</code></pre></div>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// src/interrupts/mod.rs</span>
+
+<span class="kn">mod</span><span class="w"> </span><span class="n">idt</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we create types for the IDT and its entries:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// src/interrupts/idt.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">x86</span><span class="o">::</span><span class="n">segmentation</span><span class="o">::</span><span class="p">{</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">SegmentSelector</span><span class="p">};</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Idt</span><span class="p">([</span><span class="n">Entry</span><span class="p">;</span><span class="w"> </span><span class="mi">16</span><span class="p">]);</span><span class="w"></span>
+
+<span class="cp">#[derive(Debug, Clone, Copy)]</span><span class="w"></span>
+<span class="cp">#[repr(C, packed)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Entry</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">pointer_low</span><span class="o">:</span><span class="w"> </span><span class="kt">u16</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">gdt_selector</span><span class="o">:</span><span class="w"> </span><span class="n">SegmentSelector</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">options</span><span class="o">:</span><span class="w"> </span><span class="n">EntryOptions</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">pointer_middle</span><span class="o">:</span><span class="w"> </span><span class="kt">u16</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">pointer_high</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">reserved</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The IDT is variable sized and can have up to 256 entries. We only need the first 16 entries in this post, so we define the table as <code>[Entry; 16]</code>. The remaining 240 handlers are treated as non-present by the CPU.</p>
+
+<p>The <code>Entry</code> type is the translation of the above table to Rust. The <code>repr(C, packed)</code> attribute ensures that the compiler keeps the field ordering and does not add any padding between them. Instead of describing the <code>gdt_selector</code> as a plain <code>u16</code>, we use the <code>SegmentSelector</code> type of the <code>x86</code> crate. We also merge bits 32 to 47 into an <code>option</code> field, because Rust has no <code>u3</code> or <code>u1</code> type. The <code>EntryOptions</code> type is described below:</p>
+
+<h3 id="entry-options">Entry Options</h3>
+
+<p>The <code>EntryOptions</code> type has the following skeleton:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[derive(Debug, Clone, Copy)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">EntryOptions</span><span class="p">(</span><span class="kt">u16</span><span class="p">);</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">EntryOptions</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Self</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">set_present</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">present</span><span class="o">:</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">disable_interrupts</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">disable</span><span class="o">:</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">set_privilege_level</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">dpl</span><span class="o">:</span><span class="w"> </span><span class="kt">u16</span><span class="p">)</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">set_stack_index</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">u16</span><span class="p">)</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The implementations of these methods need to modify the correct bits of the <code>u16</code> without touching the other bits. For example, we would need the following bit-fiddling to set the stack index:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0xfff8</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">stack_index</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>Or alternatively:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="mb">0b111</span><span class="p">))</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">stack_index</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>Or:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">stack_index</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>Well, none of these variants is really <em>readable</em> and it&rsquo;s very easy to make mistakes somewhere. Therefore I created a <code>BitField</code> type with the following API:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="bp">self</span><span class="p">.</span><span class="mf">0.</span><span class="n">set_range</span><span class="p">(</span><span class="mi">0</span><span class="p">..</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="n">stack_index</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+
+<p>I think it is much more readable, since we abstracted away all bit-masking details. The <code>BitField</code> type is contained in the <a href="TODO">bit_field</a> crate. (It&rsquo;s pretty new, so it might still contain bugs.) To add it as dependency, we run <code>cargo add bit_field</code> and add <code>extern crate bit_field;</code> to our <code>src/lib.rs</code>.</p>
+
+<p>Now we can use the crate to implement the methods of <code>EntryOptions</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/idt.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">bit_field</span><span class="o">::</span><span class="n">BitField</span><span class="p">;</span><span class="w"></span>
+
+<span class="cp">#[derive(Debug, Clone, Copy)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">EntryOptions</span><span class="p">(</span><span class="n">BitField</span><span class="o">&lt;</span><span class="kt">u16</span><span class="o">&gt;</span><span class="p">);</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">EntryOptions</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">minimal</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BitField</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">options</span><span class="p">.</span><span class="n">set_range</span><span class="p">(</span><span class="mi">9</span><span class="p">..</span><span class="mi">12</span><span class="p">,</span><span class="w"> </span><span class="mb">0b111</span><span class="p">);</span><span class="w"> </span><span class="c1">// &#39;must-be-one&#39; bits</span>
+<span class="w">        </span><span class="n">EntryOptions</span><span class="p">(</span><span class="n">options</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Self</span><span class="o">::</span><span class="n">minimal</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="n">options</span><span class="p">.</span><span class="n">set_present</span><span class="p">(</span><span class="k">true</span><span class="p">).</span><span class="n">disable_interrupts</span><span class="p">(</span><span class="k">true</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">options</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">set_present</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">present</span><span class="o">:</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="mf">0.</span><span class="n">set_bit</span><span class="p">(</span><span class="mi">15</span><span class="p">,</span><span class="w"> </span><span class="n">present</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">disable_interrupts</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">disable</span><span class="o">:</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="mf">0.</span><span class="n">set_bit</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="w"> </span><span class="o">!</span><span class="n">disable</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">set_privilege_level</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">dpl</span><span class="o">:</span><span class="w"> </span><span class="kt">u16</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="mf">0.</span><span class="n">set_range</span><span class="p">(</span><span class="mi">13</span><span class="p">..</span><span class="mi">15</span><span class="p">,</span><span class="w"> </span><span class="n">dpl</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">set_stack_index</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">u16</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="mf">0.</span><span class="n">set_range</span><span class="p">(</span><span class="mi">0</span><span class="p">..</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Note that the ranges are <em>exclusive</em> the upper bound. The <code>minimal</code> function creates an <code>EntryOptions</code> type with only the “must-be-one” bits set. The <code>new</code> function, on the other hand, chooses reasonable defaults: It sets the present bit (why would you want to create a non-present entry?) and disables interrupts (normally we don&rsquo;t want that our exception handlers can be interrupted). By returning the self pointer from the <code>set_*</code> methods, we allow easy method chaining such as <code>options.set_present(true).disable_interrupts(true)</code>.</p>
+
+<h3 id="creating-idt-entries">Creating IDT Entries</h3>
+
+<p>Now we can add a function to create new IDT entries:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">impl</span><span class="w"> </span><span class="n">Entry</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">(</span><span class="n">gdt_selector</span><span class="o">:</span><span class="w"> </span><span class="n">SegmentSelector</span><span class="p">,</span><span class="w"> </span><span class="n">handler</span><span class="o">:</span><span class="w"> </span><span class="n">HandlerFunc</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">pointer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">handler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u64</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="n">Entry</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">gdt_selector</span><span class="o">:</span><span class="w"> </span><span class="n">gdt_selector</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">pointer_low</span><span class="o">:</span><span class="w"> </span><span class="n">pointer</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u16</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">pointer_middle</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">pointer</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">16</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u16</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">pointer_high</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">pointer</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">32</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">options</span><span class="o">:</span><span class="w"> </span><span class="n">EntryOptions</span><span class="o">::</span><span class="n">new</span><span class="p">(),</span><span class="w"></span>
+<span class="w">            </span><span class="n">reserved</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We take a GDT selector and a handler function as arguments and create a new IDT entry for it. The <code>HandlerFunc</code> type is described below. It is a function pointer that can be converted to an <code>u64</code>. We choose the lower 16 bits for <code>pointer_low</code>, the next 16 bits for <code>pointer_middle</code> and the remaining 32 bits for <code>pointer_high</code>. For the options field we choose our default options, i.e. present and disabled interrupts.</p>
+
+<h3 id="the-handler-function-type">The Handler Function Type</h3>
+
+<p>The <code>HandlerFunc</code> type is a type alias for a function type:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">type</span><span class="w"> </span><span class="n">HandlerFunc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>It needs to be a function with a defined <a href="https://en.wikipedia.org/wiki/Calling_convention">calling convention</a>, as it called directly by the hardware. The C calling convention is the de facto standard in OS development, so we&rsquo;re using it, too. The function takes no arguments, since the hardware doesn&rsquo;t supply any arguments when jumping to the handler function.</p>
+
+<p>It is important that the function is <a href="https://doc.rust-lang.org/book/functions.html#diverging-functions">diverging</a>, i.e. it must never return. The reason is that the hardware doesn&rsquo;t <em>call</em> the handler functions, it just <em>jumps</em> to them after pushing some values to the stack. So our stack might look different:</p>
+
+<p><img src="/images/normal-vs-interrupt-function-return.svg" alt="normal function return vs interrupt function return" /></p>
+
+<p>If our handler function returned normally, it would try to pop the return address from the stack. But it might get some completely different value then. For example, the CPU pushes an error code for some exceptions. Bad things would happen if we interpreted this error code as return address and jumped to it. Therefore interrupt handler functions must diverge<sup class="footnote-ref" id="fnref:fn-must-diverge"><a rel="footnote" href="#fn:fn-must-diverge">1</a></sup>.</p>
+
+<h3 id="idt-methods">IDT methods</h3>
+
+<p>Let&rsquo;s add a function to create new interrupt descriptor tables:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">impl</span><span class="w"> </span><span class="n">Idt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Idt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">Idt</span><span class="p">([</span><span class="n">Entry</span><span class="o">::</span><span class="n">missing</span><span class="p">();</span><span class="w"> </span><span class="mi">16</span><span class="p">])</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Entry</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">missing</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">Entry</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">gdt_selector</span><span class="o">:</span><span class="w"> </span><span class="n">SegmentSelector</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span><span class="w"></span>
+<span class="w">            </span><span class="n">pointer_low</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">pointer_middle</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">pointer_high</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">options</span><span class="o">:</span><span class="w"> </span><span class="n">EntryOptions</span><span class="o">::</span><span class="n">minimal</span><span class="p">(),</span><span class="w"></span>
+<span class="w">            </span><span class="n">reserved</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>missing</code> function creates a non-present Entry. We could choose any values for the pointer and GDT selector fields as long as the present bit is not set.</p>
+
+<p>However, a table with non-present entries is not very useful. So we create a <code>set_handler</code> method to add new handler functions:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">impl</span><span class="w"> </span><span class="n">Idt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">set_handler</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">entry</span><span class="o">:</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">handler</span><span class="o">:</span><span class="w"> </span><span class="n">HandlerFunc</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">EntryOptions</span><span class="w"></span>
+<span class="w">    </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="p">[</span><span class="n">entry</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Entry</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">segmentation</span><span class="o">::</span><span class="n">cs</span><span class="p">(),</span><span class="w"> </span><span class="n">handler</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="p">[</span><span class="n">entry</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">].</span><span class="n">options</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The method overwrites the specified entry with the given handler function. We use the <code>segmentation::cs</code><sup class="footnote-ref" id="fnref:fn-segmentation-cs"><a rel="footnote" href="#fn:fn-segmentation-cs">2</a></sup> function of the <a href="https://github.com/gz/rust-x86">x86 crate</a> to get the current code segment descriptor. There&rsquo;s no need for different kernel code segments in long mode, so the current <code>cs</code> value should be always the right choice.</p>
+
+<p>By returning a mutual reference to the entry&rsquo;s options, we allow the caller to override the default settings. For example, the caller could add a non-present entry by executing: <code>idt.set_handler(11, handler_fn).set_present(false)</code>.</p>
+
+<h3 id="loading-the-idt">Loading the IDT</h3>
+
+<p>Now we&rsquo;re able to create new interrupt descriptor tables with registered handler functions. We just need a way to load an IDT, so that the CPU uses it. The x86 architecture uses a special register to store the active IDT and its length. In order to load a new IDT we need to update this register through the <a href="http://x86.renejeschke.de/html/file_module_x86_id_156.html">lidt</a> instruction.</p>
+
+<p>The <code>lidt</code> instruction expects a pointer to a special data structure, which specifies the start address of the IDT and its length:</p>
+
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td>u16</td>
+<td>Limit</td>
+<td>The maximum addressable byte in the table. Equal to the table size in bytes minus 1.</td>
+</tr>
+
+<tr>
+<td>u64</td>
+<td>Offset</td>
+<td>Virtual start address of the table.</td>
+</tr>
+</tbody>
+</table>
+
+<p>This structure is already contained <a href="http://gz.github.io/rust-x86/x86/dtables/struct.DescriptorTablePointer.html">in the x86 crate</a>, so we don&rsquo;t need to create it ourselves. The same is true for the <a href="http://gz.github.io/rust-x86/x86/dtables/fn.lidt.html">lidt function</a>. So we just need to put the pieces together to create a <code>load</code>  method:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">impl</span><span class="w"> </span><span class="n">Idt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">load</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kn">use</span><span class="w"> </span><span class="n">x86</span><span class="o">::</span><span class="n">dtables</span><span class="o">::</span><span class="p">{</span><span class="n">DescriptorTablePointer</span><span class="p">,</span><span class="w"> </span><span class="n">lidt</span><span class="p">};</span><span class="w"></span>
+<span class="w">        </span><span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">mem</span><span class="o">::</span><span class="n">size_of</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DescriptorTablePointer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">base</span><span class="o">:</span><span class="w"> </span><span class="bp">self</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">limit</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="n">size_of</span><span class="o">::&lt;</span><span class="n">Self</span><span class="o">&gt;</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u16</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">        </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">lidt</span><span class="p">(</span><span class="o">&amp;</span><span class="n">ptr</span><span class="p">)</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The method does not need to modify the IDT, so it takes <code>self</code> by immutable reference. We convert this reference to an u64 and calculate the table size using <a href="https://doc.rust-lang.org/nightly/core/mem/fn.size_of.html">mem::size_of</a>. The additional <code>-1</code> is needed because the limit field has to be the maximum addressable byte.</p>
+
+<p>Then we pass a pointer to our <code>ptr</code> structure to the <code>lidt</code> function, which calls the <code>lidt</code> assembly instruction in order to reload the IDT register. We need an unsafe block here, because the <code>lidt</code> assumes that the specified handler addresses are valid.</p>
+
+<h3 id="safety">Safety</h3>
+
+<p>But can we really guarantee that handler addresses are always valid? Let&rsquo;s see:</p>
+
+<ul>
+<li>The <code>Idt::new</code> function creates a new table populated with non-present entries. There&rsquo;s no way to set these entries to present from outside of this module, so this function is fine.</li>
+<li>The <code>set_handler</code> method allows us to overwrite a specified entry and point it to some handler function. Rust&rsquo;s type system guarantees that function pointers are always valid (as long as no <code>unsafe</code> is involved), so this function is fine, too.</li>
+</ul>
+
+<p>There are no other public functions in the <code>idt</code> module (except <code>load</code>), so it should be safe… right?</p>
+
+<p>Wrong! Imagine the following scenario:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">init</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">load_idt</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">cause_page_fault</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">load_idt</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="o">::</span><span class="n">new</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">idt</span><span class="p">.</span><span class="n">load</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">cause_page_fault</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">3</span><span class="p">,</span><span class="mi">4</span><span class="p">,</span><span class="mi">5</span><span class="p">,</span><span class="mi">6</span><span class="p">,</span><span class="mi">7</span><span class="p">,</span><span class="mi">8</span><span class="p">,</span><span class="mi">9</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="mh">0xdeadbeaf</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">x</span><span class="p">[</span><span class="mi">4</span><span class="p">]</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>This won&rsquo;t work. If we&rsquo;re lucky, we get a triple fault and a boot loop. If we&rsquo;re unlucky, our kernel does strange things and fails at some completely unrelated place. So what&rsquo;s the problem here?</p>
+
+<p>Well, we construct an IDT <em>on the stack</em> and load it. It is perfectly valid until the end of the <code>load_idt</code> function. But as soon as the function returns, its stack frame can be reused by other functions. Thus, the IDT gets overwritten by the stack frame of the <code>cause_page_fault</code> function. So when the page fault occurs and the CPU tries to read the entry, it only sees some garbage values and issues a double fault, which escalates to a triple fault and a CPU reset.</p>
+
+<p>Now imagine that the <code>cause_page_fault</code> function declared an array of pointers instead. If the present was coincidentally set, the CPU would jump to some random pointer and interpret random memory as code. This would be a clear violation of memory safety.</p>
+
+<h3 id="fixing-the-load-method">Fixing the load method</h3>
+
+<p>So how do we fix it? We could make the load function itself <code>unsafe</code> and push the unsafety to the caller. However, there is a much better solution in this case. In order to see it, we formulate the requirement for the <code>load</code> method:</p>
+
+<blockquote>
+<p>The referenced IDT must be valid until a new IDT is loaded.</p>
+</blockquote>
+
+<p>We can&rsquo;t know when the next IDT will be loaded. Maybe never. So in the worst case:</p>
+
+<blockquote>
+<p>The referenced IDT must be valid as long as our kernel runs.</p>
+</blockquote>
+
+<p>This is exactly the definition of a <a href="http://rustbyexample.com/scope/lifetime/static_lifetime.html">static lifetime</a>. So we can easily ensure that the IDT lives long enough by adding a <code>'static</code> requirement to the signature of the <code>load</code> function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">load</span><span class="p">(</span><span class="o">&amp;</span><span class="nb">&#39;static</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+<span class="c1">//           ^^^^^^^ ensure that the IDT reference has the &#39;static lifetime</span>
+</code></pre></div>
+
+<p>That&rsquo;s it! Now the Rust compiler ensures that the above error can&rsquo;t happen anymore:</p>
+
+<pre><code>error: `idt` does not live long enough
+  --&gt; src/interrupts/mod.rs:78:5
+78 |&gt;     idt.load();
+   |&gt;     ^^^
+note: reference must be valid for the static lifetime...
+note: ...but borrowed value is only valid for the block suffix following
+          statement 0 at 75:34
+  --&gt; src/interrupts/mod.rs:75:35
+75 |&gt;     let mut idt = idt::Idt::new();
+   |&gt;                                   ^
+</code></pre>
+
+<h3 id="a-static-idt">A static IDT</h3>
+
+<p>So a valid IDT needs to have the <code>'static</code> lifetime. We can either create a <code>static</code> IDT or <a href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html#method.into_raw">deliberately leak a Box</a>. We will most likely only need a single IDT for the foreseeable future, so let&rsquo;s try the <code>static</code> approach:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="k">static</span><span class="w"> </span><span class="n">IDT</span><span class="o">:</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="o">::</span><span class="n">new</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">idt</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;EXCEPTION: PAGE FAULT&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We register a single handler function for a page fault (index 14). The handler function just prints an error message and enters a <code>loop</code>. However, it doesn&rsquo;t work this way:</p>
+
+<pre><code>error: calls in statics are limited to constant functions, struct and enum
+       constructors [E0015]
+...
+error: blocks in statics are limited to items and tail expressions [E0016]
+...
+error: references in statics may only refer to immutable values [E0017]
+...
+</code></pre>
+
+<p>The reason is that the Rust compiler is not able to evaluate the value of the <code>static</code> at compile time. Maybe it will work someday when <code>const</code> functions become more powerful. But until then, we have to find another solution.</p>
+
+<h3 id="lazy-statics-to-the-rescue">Lazy Statics to the Rescue</h3>
+
+<p>Fortunately the <code>lazy_static</code> macro exists. Instead of evaluating a <code>static</code> at compile time, the macro performs the initialization when the <code>static</code> is referenced the first time. Thus, we can do almost everything in the initialization block and are even able to read runtime values.</p>
+
+<p>With <code>lazy_static</code>, we can define our IDT without problems:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="n">lazy_static</span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">ref</span><span class="w"> </span><span class="n">IDT</span><span class="o">:</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="o">::</span><span class="n">new</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">        </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">        </span><span class="n">idt</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we&rsquo;re ready to load our IDT! Therefore we add a <code>interrupts::init</code> function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">init</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">IDT</span><span class="p">.</span><span class="n">load</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We don&rsquo;t need our <code>assert_has_not_been_called</code> macro here, since nothing bad happens when <code>init</code> is called twice. It just reloads the same IDT again.</p>
+
+<h2 id="testing-it">Testing it</h2>
+
+<p>Now we should be able to catch page faults! Let&rsquo;s try it in our <code>rust_main</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(...)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="n">memory</span><span class="o">::</span><span class="n">init</span><span class="p">(</span><span class="n">boot_info</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// initialize our IDT</span>
+<span class="w">    </span><span class="n">interrupts</span><span class="o">::</span><span class="n">init</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// provoke a page fault by writing to some random address</span>
+<span class="w">    </span><span class="k">unsafe</span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="mh">0xdeadbeaf</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>It works! We see a <code>EXCEPTION: PAGE FAULT</code> message at the bottom of our screen:</p>
+
+<p><img src="images/qemu-page-fault-println.png" alt="QEMU screenshot with `EXCEPTION: PAGE FAULT` message" /></p>
+
+<p>Let&rsquo;s try something else:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(...)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="n">interrupts</span><span class="o">::</span><span class="n">init</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// provoke a page fault inside println</span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="k">unsafe</span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="mh">0xdeadbeaf</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="w"> </span><span class="p">});</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now the output ends on the <code>guard page</code> line. No <code>EXCEPTION</code> message and no <code>It did not crash</code> message either. What&rsquo;s happening?</p>
+
+<h3 id="debugging">Debugging</h3>
+
+<p>Let&rsquo;s debug it using <a href="https://www.gnu.org/software/gdb/">GDB</a>. It is a console debugger and works with nearly everything, including QEMU. To make QEMU listen for a debugger connection, we start it with the <code>-s</code> flag:</p>
+<div class="highlight"><pre><code class="language-Makefile" data-lang="Makefile"><span></span><span class="c"># in `Makefile`</span>
+
+<span class="nf">run</span><span class="o">:</span> <span class="k">$(</span><span class="nv">iso</span><span class="k">)</span>
+	@qemu-system-x86_64 -cdrom <span class="k">$(</span>iso<span class="k">)</span> -s
+</code></pre></div>
+
+<p>Then we can launch GDB in another console window:</p>
+
+<pre><code>&gt; gdb build/kernel-x86_64.bin
+[some version, copyright, and usage information]
+Reading symbols from build/kernel-x86_64.bin...done.
+(gdb)
+</code></pre>
+
+<p>Now we can connect to our running QEMU instance on port <code>1234</code>:</p>
+
+<pre><code>(gdb) target remote :1234
+Remote debugging using :1234
+0x00000000001031bd in spin::mutex::cpu_relax ()
+    at /home/.../spin-0.3.5/src/mutex.rs:102
+102	    unsafe { asm!(&quot;pause&quot; :::: &quot;volatile&quot;); }
+</code></pre>
+
+<p>So we&rsquo;re locked in a function named <code>mutex::cpu_relax</code> inside the <code>spin</code> crate. Let&rsquo;s try a backtrace:</p>
+
+<pre><code>(gdb) backtrace
+#0  0x00000000001031bd in spin::mutex::cpu_relax ()
+    at /home/.../spin-0.3.5/src/mutex.rs:102
+#1  spin::mutex::{{impl}}::obtain_lock&lt;blog_os::vga_buffer::Writer&gt; (
+    self=0x111230 &lt;blog_os::vga_buffer::WRITER::h702c3f466147ac3b&gt;)
+    at /home/.../spin-0.3.5/src/mutex.rs:142
+#2  0x0000000000103143 in spin::mutex::{{impl}}::lock&lt;blog_os::vga_buffer::
+    Writer&gt; (
+    self=0x111230 &lt;blog_os::vga_buffer::WRITER::h702c3f466147ac3b&gt;)
+    at /home/.../spin-0.3.5/src/mutex.rs:163
+#3  0x000000000010da59 in blog_os::interrupts::page_fault_handler ()
+    at src/vga_buffer.rs:31
+...
+</code></pre>
+
+<p>Pretty verbose… but very useful. Let&rsquo;s clean it up a bit:</p>
+
+<ul>
+<li><code>spin::mutex::cpu_relax</code></li>
+<li><code>spin::mutex::obtain_lock&lt;vga_buffer::Writer&gt;</code></li>
+<li><code>spin::mutex::lock&lt;vga_buffer::Writer&gt;</code></li>
+<li><code>blog_os::interrupts::page_fault_handler</code></li>
+<li>&hellip;</li>
+</ul>
+
+<p>It&rsquo;s a <em>back</em>-trace, so it goes from the innermost function to the outermost function. We see that our page fault handler was called successfully. It then tried to write its error message. Therefore, it tried to <code>lock</code> the static <code>WRITER</code>, which in turn called <code>obtain_lock</code> and <code>cpu_relax</code>.</p>
+
+<p>So our kernel tries to lock the output <code>WRITER</code>, which is already locked by the interrupted <code>println</code>. Thus, our exception handler waits forever and we don&rsquo;t see what error occurred. Yay, that&rsquo;s our first deadlock! :)</p>
+
+<p>(As you see, GDB can be very useful sometimes. For more GDB information check out our <a href="/set-up-gdb.html">Set Up GDB</a> page.)</p>
+
+<h2 id="printing-errors-reliably">Printing Errors Reliably</h2>
+
+<p>In order to guarantee that we always see error messages, we add a <code>print_error</code> function to our <code>vga_buffer</code> module:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/vga_buffer.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">print_error</span><span class="p">(</span><span class="n">fmt</span><span class="o">:</span><span class="w"> </span><span class="n">fmt</span><span class="o">::</span><span class="n">Arguments</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">fmt</span><span class="o">::</span><span class="n">Write</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">writer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">column_position</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">color_code</span><span class="o">:</span><span class="w"> </span><span class="n">ColorCode</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">Color</span><span class="o">::</span><span class="n">Red</span><span class="p">,</span><span class="w"> </span><span class="n">Color</span><span class="o">::</span><span class="n">Black</span><span class="p">),</span><span class="w"></span>
+<span class="w">        </span><span class="n">buffer</span><span class="o">:</span><span class="w"> </span><span class="n">Unique</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mh">0xb8000</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="n">writer</span><span class="p">.</span><span class="n">new_line</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">writer</span><span class="p">.</span><span class="n">write_fmt</span><span class="p">(</span><span class="n">fmt</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Instead of using the static <code>WRITER</code>, this function creates a new <code>Writer</code> on each invocation. Thereby it ignores the mutex and is always able to print to the screen without deadlocking. We print in red to highlight the error and add a newline to avoid overwriting unfinished lines.</p>
+
+<h3 id="safety-1">Safety</h3>
+
+<p>This function clearly violates the invariants of the <code>vga_buffer</code> module, as it creates another <code>Unique</code> pointing to <code>0xb8000</code>. Thus, we deliberately introduce a data race on the VGA buffer. For this reason, the function is marked as <code>unsafe</code> and should only be used if absolutely necessary.</p>
+
+<p>However, the situation is not <em>that</em> bad. The VGA buffer only stores characters (no pointers) and we never rely on the buffer&rsquo;s values. So the function might cause mangled output, but should never be able to violate memory safety.</p>
+
+<h3 id="using-print-error">Using print_error</h3>
+
+<p>Let&rsquo;s use the new <code>print_error</code> function to print the page fault error:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">vga_buffer</span><span class="o">::</span><span class="n">print_error</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">print_error</span><span class="p">(</span><span class="n">format_args</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;EXCEPTION: PAGE FAULT&quot;</span><span class="p">))</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We use the built-in <a href="https://doc.rust-lang.org/nightly/std/macro.format_args!.html">format_args</a> macro to translate the error string to a <code>fmt::Arguments</code> type. Now we should always see the error message, even if the exception occurred inside <code>println</code>:</p>
+
+<p><img src="images/qemu-page-fault-red.png" alt="QEMU screenshot with new red `EXCEPTION: PAGE FAULT` message" /></p>
+
+<h2 id="what-s-next">What&rsquo;s next?</h2>
+
+<p>Now we&rsquo;re able to catch <em>almost</em> all page faults. However, some page faults still cause a triple fault and a bootloop. For example, try the following code:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(...)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="n">interrupts</span><span class="o">::</span><span class="n">init</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// provoke a kernel stack overflow, which hits the guard page</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">recursive</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">recursive</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">recursive</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The next post will explore and fix this triple fault by creating a double fault handler. After that, we should never again experience a triple fault in our kernel.</p>
+<div class="footnotes">
+
+<hr />
+
+<ol>
+<li id="fn:fn-must-diverge">Another reason is that we overwrite the current register values by executing the handler function. Thus, the interrupted function looses its state and can&rsquo;t proceed anyway.
+ <a class="footnote-return" href="#fnref:fn-must-diverge"><sup>[return]</sup></a></li>
+<li id="fn:fn-segmentation-cs">The <code>segmentation::cs</code> function was <a href="https://github.com/gz/rust-x86/pull/12">added</a> in version 0.7.0, so you might need to update your <code>x86</code> version in your <code>Cargo.toml</code>.
+ <a class="footnote-return" href="#fnref:fn-segmentation-cs"><sup>[return]</sup></a></li>
+</ol>
+</div>
+
+</article>
+
+<hr>
+<div class="PageNavigation">
+  
+    <a class="prev" href="/kernel-heap.html">&laquo; Kernel Heap</a>
+  
+  
+</div>
+<hr>
+
+<div id="disqus_thread"></div>
+<script>
+  (function() {
+    
+    
+    if (window.location.hostname == "localhost")
+        return;
+
+    var d = document, s = d.createElement('script');
+
+    s.src = '//phil-opp.disqus.com/embed.js';
+
+    s.setAttribute('data-timestamp', +new Date());
+    (d.head || d.body).appendChild(s);
+  })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript" rel="nofollow">comments powered by Disqus.</a></noscript>
+
+<script type="text/javascript">
+  anchors.options = {
+    placement: 'left',
+  };
+  anchors.add('article h2, article h3, article h4, article h5, article h6');
+</script>
+
+</main>
+
+<footer class="footer">
+  <small>
+    &copy;
+    <time datetime="2016">2016</time>. All rights reserved.
+    <a href="/contact.html">Contact</a>
+  </small>
+</footer>
+</div>
+
+</body>
+</html>
+
