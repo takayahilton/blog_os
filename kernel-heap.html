@@ -327,28 +327,9 @@
 <span class="kd">let</span><span class="w"> </span><span class="n">heap_test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Box</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mi">42</span><span class="p">);</span><span class="w"></span>
 </code></pre></div>
 
-<p>When we try to compile it using <code>make run</code>, we get several linker errors about a function named <code>_Unwind_Resume</code>:</p>
+<p>(If you&rsquo;re getting a linker error about <code>_Unwind_Resume</code>, try to use the <a href="https://github.com/phil-opp/blog_os/pull/170">panic=abort cargo option</a>.)</p>
 
-<pre><code>target/x86_64-unknown-linux-gnu/debug/libblog_os.a(bump_allocator-[…].0.o):
-    In function `bump_allocator::__rust_allocate':
-/home/…/blog_os/libs/bump_allocator/src/lib.rs:19:
-    undefined reference to `_Unwind_Resume'
-</code></pre>
-
-<p>This function is part of Rust&rsquo;s unwinding machinery. We disabled most of by passing <code>-Z no-landing-pads</code> to rustc, but apparently our precompiled <code>libcollections</code> still links to it.</p>
-
-<p>To work around this issue for now, we add a dummy function:</p>
-<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/bump_allocator/src/lib.rs</span>
-
-<span class="cp">#[no_mangle]</span><span class="w"></span>
-<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">_Unwind_Resume</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
-<span class="w">    </span><span class="k">loop</span><span class="p">{}</span><span class="w"></span>
-<span class="p">}</span><span class="w"></span>
-</code></pre></div>
-
-<p>This is just a temporary fix to keep this post simple. We will resolve this issue in a better way in a future post.</p>
-
-<p>Now our kernel compiles again. But when we run it, a triple fault occurs and causes permanent rebooting. We use QEMU for debugging as described <a href="http://os.phil-opp.com/remap-the-kernel.html#debugging">in the previous post</a>:</p>
+<p>When we run it, a triple fault occurs and causes permanent rebooting. Let&rsquo;s try debug it using QEMU and objdump as described <a href="http://os.phil-opp.com/remap-the-kernel.html#debugging">in the previous post</a>:</p>
 
 <pre><code>&gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
 …

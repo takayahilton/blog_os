@@ -71,6 +71,8 @@
   <time datetime="2015-09-02" class="post-date">
     Sep 2, 2015
     
+      (updated on May 29, 2015)
+    
   </time>
 
   
@@ -78,6 +80,8 @@
 <p>In the previous posts we created a <a href="/multiboot-kernel.html">minimal Multiboot kernel</a> and <a href="/entering-longmode.html">switched to Long Mode</a>. Now we can finally switch to <a href="https://www.rust-lang.org/">Rust</a> code. Rust is a high-level language without runtime. It allows us to not link the standard library and write bare metal code. Unfortunately the setup is not quite hassle-free yet.</p>
 
 <p>This blog post tries to set up Rust step-by-step and point out the different problems. If you have any questions, problems, or suggestions please <a href="https://github.com/phil-opp/blog_os/issues">file an issue</a> or create a comment at the bottom. The code from this post is in a <a href="https://github.com/phil-opp/blog_os/tree/set_up_rust">Github repository</a>, too.</p>
+
+<p><strong>Update</strong>: We now use the <code>panic=abort</code> cargo option instead of <code>-Z no-landing-pads</code>. See <a href="https://github.com/phil-opp/blog_os/pull/170">#170</a>.</p>
 
 <h2 id="installing-rust">Installing Rust</h2>
 
@@ -251,14 +255,23 @@ target/debug/libblog_os.a(core-35017696.0.o):
     undefined reference to `_Unwind_Resume'
 </code></pre>
 
-<p>So the linker can&rsquo;t find a function named <code>_Unwind_Resume</code> that is referenced in <code>iter.rs:654</code> in libcore. This reference is not really there at <a href="https://github.com/rust-lang/rust/blob/b0ca03923359afc8df92a802b7cc1476a72fb2d0/src/libcore/iter.rs#L654">line 654 of libcore&rsquo;s <code>iter.rs</code></a>. Instead, it is a compiler inserted <em>landing pad</em>, which is used for exception handling.</p>
+<p>So the linker can&rsquo;t find a function named <code>_Unwind_Resume</code> that is referenced in <code>iter.rs:654</code> in libcore. This reference is not really there at <a href="https://github.com/rust-lang/rust/blob/b0ca03923359afc8df92a802b7cc1476a72fb2d0/src/libcore/iter.rs#L654">line 654 of libcore&rsquo;s <code>iter.rs</code></a>. Instead, it is a compiler inserted <em>landing pad</em>, which is used for panic handling by default.</p>
 
-<p>The easiest way of fixing this problem is to disable the landing pad creation since we don&rsquo;t supports panics anyway right now. We can do this by passing a <code>-Z no-landing-pads</code> flag to <code>rustc</code> (the actual Rust compiler below cargo). To do this we replace the <code>cargo build</code> command in our Makefile with the <code>cargo rustc</code> command, which does the same but allows passing flags to <code>rustc</code>:</p>
-<div class="highlight"><pre><code class="language-make" data-lang="make"><span></span><span class="nf">cargo</span><span class="o">:</span>
-	@cargo rustc --target <span class="k">$(</span>target<span class="k">)</span> -- -Z no-landing-pads
+<p>By default, the destructors of all stack variables are run when a <code>panic</code> occurs. This is called <em>unwinding</em> and allows parent threads to <a href="https://doc.rust-lang.org/book/concurrency.html#panics">recover from panics</a>. However, it requires a platform specific gcc library, which isn&rsquo;t available in our kernel.</p>
+
+<p>Fortunately, Rust allows us to disable unwinding. We just need to add some entries in our <code>Cargo.toml</code>:</p>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="c1"># The development profile, used for `cargo build`.</span>
+<span class="p">[</span><span class="n">profile</span><span class="p">.</span><span class="n">dev</span><span class="p">]</span>
+<span class="n">panic</span> <span class="o">=</span> <span class="s">&quot;abort&quot;</span>
+
+<span class="c1"># The release profile, used for `cargo build --release`.</span>
+<span class="p">[</span><span class="n">profile</span><span class="p">.</span><span class="n">release</span><span class="p">]</span>
+<span class="n">panic</span> <span class="o">=</span> <span class="s">&quot;abort&quot;</span>
 </code></pre></div>
 
-<p>Now we fixed all linking issues and our kernel should <em>build</em> again. But instead of displaying <code>Hello World</code>, it constantly reboots itself when we start it.</p>
+<p>These <a href="http://doc.crates.io/manifest.html#the-profile-sections">profile sections</a> specify options for <code>cargo build</code> and <code>cargo release</code>. By setting the <code>panic</code> option to <code>abort</code>, we disable all unwinding in our kernel.</p>
+
+<p>Now we fixed all linking issues and our kernel builds again. But instead of displaying <code>Hello World</code>, it constantly reboots itself when we start it.</p>
 
 <h2 id="debugging-the-boot-loop">Debugging the Boot Loop</h2>
 

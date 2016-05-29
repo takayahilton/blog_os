@@ -964,28 +964,9 @@ Remote debugging using :1234
 &lt;span class=&#34;kd&#34;&gt;let&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;n&#34;&gt;heap_test&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;=&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;nb&#34;&gt;Box&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;new&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;mi&#34;&gt;42&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;);&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
-&lt;p&gt;When we try to compile it using &lt;code&gt;make run&lt;/code&gt;, we get several linker errors about a function named &lt;code&gt;_Unwind_Resume&lt;/code&gt;:&lt;/p&gt;
+&lt;p&gt;(If you&amp;rsquo;re getting a linker error about &lt;code&gt;_Unwind_Resume&lt;/code&gt;, try to use the &lt;a href=&#34;https://github.com/phil-opp/blog_os/pull/170&#34;&gt;panic=abort cargo option&lt;/a&gt;.)&lt;/p&gt;
 
-&lt;pre&gt;&lt;code&gt;target/x86_64-unknown-linux-gnu/debug/libblog_os.a(bump_allocator-[…].0.o):
-    In function `bump_allocator::__rust_allocate&#39;:
-/home/…/blog_os/libs/bump_allocator/src/lib.rs:19:
-    undefined reference to `_Unwind_Resume&#39;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;p&gt;This function is part of Rust&amp;rsquo;s unwinding machinery. We disabled most of by passing &lt;code&gt;-Z no-landing-pads&lt;/code&gt; to rustc, but apparently our precompiled &lt;code&gt;libcollections&lt;/code&gt; still links to it.&lt;/p&gt;
-
-&lt;p&gt;To work around this issue for now, we add a dummy function:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;// in libs/bump_allocator/src/lib.rs&lt;/span&gt;
-
-&lt;span class=&#34;cp&#34;&gt;#[no_mangle]&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;k&#34;&gt;pub&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;k&#34;&gt;extern&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;k&#34;&gt;fn&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;n&#34;&gt;_Unwind_Resume&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;()&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;-&amp;gt;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;!&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;p&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;k&#34;&gt;loop&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;{}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;span class=&#34;p&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;This is just a temporary fix to keep this post simple. We will resolve this issue in a better way in a future post.&lt;/p&gt;
-
-&lt;p&gt;Now our kernel compiles again. But when we run it, a triple fault occurs and causes permanent rebooting. We use QEMU for debugging as described &lt;a href=&#34;http://os.phil-opp.com/remap-the-kernel.html#debugging&#34;&gt;in the previous post&lt;/a&gt;:&lt;/p&gt;
+&lt;p&gt;When we run it, a triple fault occurs and causes permanent rebooting. Let&amp;rsquo;s try debug it using QEMU and objdump as described &lt;a href=&#34;http://os.phil-opp.com/remap-the-kernel.html#debugging&#34;&gt;in the previous post&lt;/a&gt;:&lt;/p&gt;
 
 &lt;pre&gt;&lt;code&gt;&amp;gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
 …
@@ -4389,6 +4370,8 @@ multiboot_start: 0x11d400, multiboot_end: 0x11d9c8
 
 &lt;p&gt;This blog post tries to set up Rust step-by-step and point out the different problems. If you have any questions, problems, or suggestions please &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues&#34;&gt;file an issue&lt;/a&gt; or create a comment at the bottom. The code from this post is in a &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/set_up_rust&#34;&gt;Github repository&lt;/a&gt;, too.&lt;/p&gt;
 
+&lt;p&gt;&lt;strong&gt;Update&lt;/strong&gt;: We now use the &lt;code&gt;panic=abort&lt;/code&gt; cargo option instead of &lt;code&gt;-Z no-landing-pads&lt;/code&gt;. See &lt;a href=&#34;https://github.com/phil-opp/blog_os/pull/170&#34;&gt;#170&lt;/a&gt;.&lt;/p&gt;
+
 &lt;h2 id=&#34;installing-rust&#34;&gt;Installing Rust&lt;/h2&gt;
 
 &lt;p&gt;We need a nightly compiler, as we will use many unstable features. To manage Rust installations I highly recommend brson&amp;rsquo;s &lt;a href=&#34;https://github.com/brson/multirust&#34;&gt;multirust&lt;/a&gt;. It allows you to install nightly, beta, and stable compilers side-by-side and makes it easy to update them. To use a nightly compiler for the current directory, you can run &lt;code&gt;multirust override nightly&lt;/code&gt;.&lt;/p&gt;
@@ -4561,14 +4544,23 @@ target/debug/libblog_os.a(core-35017696.0.o):
     undefined reference to `_Unwind_Resume&#39;
 &lt;/code&gt;&lt;/pre&gt;
 
-&lt;p&gt;So the linker can&amp;rsquo;t find a function named &lt;code&gt;_Unwind_Resume&lt;/code&gt; that is referenced in &lt;code&gt;iter.rs:654&lt;/code&gt; in libcore. This reference is not really there at &lt;a href=&#34;https://github.com/rust-lang/rust/blob/b0ca03923359afc8df92a802b7cc1476a72fb2d0/src/libcore/iter.rs#L654&#34;&gt;line 654 of libcore&amp;rsquo;s &lt;code&gt;iter.rs&lt;/code&gt;&lt;/a&gt;. Instead, it is a compiler inserted &lt;em&gt;landing pad&lt;/em&gt;, which is used for exception handling.&lt;/p&gt;
+&lt;p&gt;So the linker can&amp;rsquo;t find a function named &lt;code&gt;_Unwind_Resume&lt;/code&gt; that is referenced in &lt;code&gt;iter.rs:654&lt;/code&gt; in libcore. This reference is not really there at &lt;a href=&#34;https://github.com/rust-lang/rust/blob/b0ca03923359afc8df92a802b7cc1476a72fb2d0/src/libcore/iter.rs#L654&#34;&gt;line 654 of libcore&amp;rsquo;s &lt;code&gt;iter.rs&lt;/code&gt;&lt;/a&gt;. Instead, it is a compiler inserted &lt;em&gt;landing pad&lt;/em&gt;, which is used for panic handling by default.&lt;/p&gt;
 
-&lt;p&gt;The easiest way of fixing this problem is to disable the landing pad creation since we don&amp;rsquo;t supports panics anyway right now. We can do this by passing a &lt;code&gt;-Z no-landing-pads&lt;/code&gt; flag to &lt;code&gt;rustc&lt;/code&gt; (the actual Rust compiler below cargo). To do this we replace the &lt;code&gt;cargo build&lt;/code&gt; command in our Makefile with the &lt;code&gt;cargo rustc&lt;/code&gt; command, which does the same but allows passing flags to &lt;code&gt;rustc&lt;/code&gt;:&lt;/p&gt;
-&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-make&#34; data-lang=&#34;make&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;nf&#34;&gt;cargo&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt;
-	@cargo rustc --target &lt;span class=&#34;k&#34;&gt;$(&lt;/span&gt;target&lt;span class=&#34;k&#34;&gt;)&lt;/span&gt; -- -Z no-landing-pads
+&lt;p&gt;By default, the destructors of all stack variables are run when a &lt;code&gt;panic&lt;/code&gt; occurs. This is called &lt;em&gt;unwinding&lt;/em&gt; and allows parent threads to &lt;a href=&#34;https://doc.rust-lang.org/book/concurrency.html#panics&#34;&gt;recover from panics&lt;/a&gt;. However, it requires a platform specific gcc library, which isn&amp;rsquo;t available in our kernel.&lt;/p&gt;
+
+&lt;p&gt;Fortunately, Rust allows us to disable unwinding. We just need to add some entries in our &lt;code&gt;Cargo.toml&lt;/code&gt;:&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-toml&#34; data-lang=&#34;toml&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;# The development profile, used for `cargo build`.&lt;/span&gt;
+&lt;span class=&#34;p&#34;&gt;[&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;profile&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;dev&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;]&lt;/span&gt;
+&lt;span class=&#34;n&#34;&gt;panic&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;=&lt;/span&gt; &lt;span class=&#34;s&#34;&gt;&amp;quot;abort&amp;quot;&lt;/span&gt;
+
+&lt;span class=&#34;c1&#34;&gt;# The release profile, used for `cargo build --release`.&lt;/span&gt;
+&lt;span class=&#34;p&#34;&gt;[&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;profile&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;release&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;]&lt;/span&gt;
+&lt;span class=&#34;n&#34;&gt;panic&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;=&lt;/span&gt; &lt;span class=&#34;s&#34;&gt;&amp;quot;abort&amp;quot;&lt;/span&gt;
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
-&lt;p&gt;Now we fixed all linking issues and our kernel should &lt;em&gt;build&lt;/em&gt; again. But instead of displaying &lt;code&gt;Hello World&lt;/code&gt;, it constantly reboots itself when we start it.&lt;/p&gt;
+&lt;p&gt;These &lt;a href=&#34;http://doc.crates.io/manifest.html#the-profile-sections&#34;&gt;profile sections&lt;/a&gt; specify options for &lt;code&gt;cargo build&lt;/code&gt; and &lt;code&gt;cargo release&lt;/code&gt;. By setting the &lt;code&gt;panic&lt;/code&gt; option to &lt;code&gt;abort&lt;/code&gt;, we disable all unwinding in our kernel.&lt;/p&gt;
+
+&lt;p&gt;Now we fixed all linking issues and our kernel builds again. But instead of displaying &lt;code&gt;Hello World&lt;/code&gt;, it constantly reboots itself when we start it.&lt;/p&gt;
 
 &lt;h2 id=&#34;debugging-the-boot-loop&#34;&gt;Debugging the Boot Loop&lt;/h2&gt;
 
