@@ -4374,7 +4374,7 @@ multiboot_start: 0x11d400, multiboot_end: 0x11d9c8
 
 &lt;h2 id=&#34;installing-rust&#34;&gt;Installing Rust&lt;/h2&gt;
 
-&lt;p&gt;We need a nightly compiler, as we will use many unstable features. To manage Rust installations I highly recommend brson&amp;rsquo;s &lt;a href=&#34;https://github.com/brson/multirust&#34;&gt;multirust&lt;/a&gt;. It allows you to install nightly, beta, and stable compilers side-by-side and makes it easy to update them. To use a nightly compiler for the current directory, you can run &lt;code&gt;multirust override nightly&lt;/code&gt;.&lt;/p&gt;
+&lt;p&gt;We need a nightly compiler, as we will use many unstable features. To manage Rust installations I highly recommend &lt;a href=&#34;https://www.rustup.rs/&#34;&gt;rustup&lt;/a&gt;. It allows you to install nightly, beta, and stable compilers side-by-side and makes it easy to update them. To use a nightly compiler for the current directory, you can run &lt;code&gt;rustup override add nightly&lt;/code&gt;.&lt;/p&gt;
 
 &lt;p&gt;The code from this post (and all following) is &lt;a href=&#34;https://travis-ci.org/phil-opp/blog_os&#34;&gt;automatically tested&lt;/a&gt; every day and should always work for the newest nightly. If it doesn&amp;rsquo;t, please &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues&#34;&gt;file an issue&lt;/a&gt;.&lt;/p&gt;
 
