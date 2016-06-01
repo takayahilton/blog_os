@@ -809,7 +809,7 @@ SECTIONS {
 
 <h3 id="debugging">Debugging</h3>
 
-<p>A QEMU boot load indicates that some CPU exception occured. We can see all thrown CPU exception by starting QEMU with <code>-d int</code> (as described <a href="/set-up-rust.html#debugging">here</a>):</p>
+<p>A QEMU boot loop indicates that some CPU exception occured. We can see all thrown CPU exception by starting QEMU with <code>-d int</code> (as described <a href="/set-up-rust.html#debugging">here</a>):</p>
 <div class="highlight"><pre><code class="language-bash" data-lang="bash"><span></span>&gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
 ...
 check_exception old: 0xffffffff new 0xe

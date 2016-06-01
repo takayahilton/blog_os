@@ -286,7 +286,7 @@
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="bp">self</span><span class="p">.</span><span class="mf">0.</span><span class="n">set_range</span><span class="p">(</span><span class="mi">0</span><span class="p">..</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="n">stack_index</span><span class="p">);</span><span class="w"></span>
 </code></pre></div>
 
-<p>I think it is much more readable, since we abstracted away all bit-masking details. The <code>BitField</code> type is contained in the <a href="TODO">bit_field</a> crate. (It&rsquo;s pretty new, so it might still contain bugs.) To add it as dependency, we run <code>cargo add bit_field</code> and add <code>extern crate bit_field;</code> to our <code>src/lib.rs</code>.</p>
+<p>I think it is much more readable, since we abstracted away all bit-masking details. The <code>BitField</code> type is contained in the <a href="https://crates.io/crates/bit_field">bit_field</a> crate. (It&rsquo;s pretty new, so it might still contain bugs.) To add it as dependency, we run <code>cargo add bit_field</code> and add <code>extern crate bit_field;</code> to our <code>src/lib.rs</code>.</p>
 
 <p>Now we can use the crate to implement the methods of <code>EntryOptions</code>:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/idt.rs</span>
