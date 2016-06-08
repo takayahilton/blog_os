@@ -4527,7 +4527,7 @@ target/debug/libblog_os.a(core-35017696.0.o):
 
 &lt;p&gt;Now everything should work again (the green &lt;code&gt;OKAY&lt;/code&gt;). But there is another linking issue, which is triggered by some other example code.&lt;/p&gt;
 
-&lt;h3 id=&#34;no-landing-pads&#34;&gt;no-landing-pads&lt;/h3&gt;
+&lt;h3 id=&#34;panic-abort&#34;&gt;panic == abort&lt;/h3&gt;
 
 &lt;p&gt;The following snippet still fails:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;p&#34;&gt;...&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
