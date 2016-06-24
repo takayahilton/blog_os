@@ -38,3 +38,9 @@ extern "C" fn eh_personality() {}
 #[cfg(not(test))]
 #[lang = "panic_fmt"]
 extern "C" fn panic_fmt() -> ! {loop{}}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn _Unwind_Resume() -> ! {
+    loop {}
+}
