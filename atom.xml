@@ -4527,7 +4527,7 @@ target/debug/libblog_os.a(core-35017696.0.o):
 
 &lt;p&gt;Now everything should work again (the green &lt;code&gt;OKAY&lt;/code&gt;). But there is another linking issue, which is triggered by some other example code.&lt;/p&gt;
 
-&lt;h3 id=&#34;panic-abort&#34;&gt;panic == abort&lt;/h3&gt;
+&lt;h3 id=&#34;panic-abort&#34;&gt;panic = &amp;ldquo;abort&amp;rdquo;&lt;/h3&gt;
 
 &lt;p&gt;The following snippet still fails:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;p&#34;&gt;...&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
@@ -4544,7 +4544,7 @@ target/debug/libblog_os.a(core-35017696.0.o):
     undefined reference to `_Unwind_Resume&#39;
 &lt;/code&gt;&lt;/pre&gt;
 
-&lt;p&gt;So the linker can&amp;rsquo;t find a function named &lt;code&gt;_Unwind_Resume&lt;/code&gt; that is referenced in &lt;code&gt;iter.rs:654&lt;/code&gt; in libcore. This reference is not really there at &lt;a href=&#34;https://github.com/rust-lang/rust/blob/b0ca03923359afc8df92a802b7cc1476a72fb2d0/src/libcore/iter.rs#L654&#34;&gt;line 654 of libcore&amp;rsquo;s &lt;code&gt;iter.rs&lt;/code&gt;&lt;/a&gt;. Instead, it is a compiler inserted &lt;em&gt;landing pad&lt;/em&gt;, which is used for panic handling by default.&lt;/p&gt;
+&lt;p&gt;So the linker can&amp;rsquo;t find a function named &lt;code&gt;_Unwind_Resume&lt;/code&gt; that is referenced in &lt;code&gt;iter.rs:654&lt;/code&gt; in libcore. This reference is not really there at &lt;a href=&#34;https://github.com/rust-lang/rust/blob/b0ca03923359afc8df92a802b7cc1476a72fb2d0/src/libcore/iter.rs#L654&#34;&gt;line 654 of libcore&amp;rsquo;s &lt;code&gt;iter.rs&lt;/code&gt;&lt;/a&gt;. Instead, it is a compiler inserted &lt;em&gt;landing pad&lt;/em&gt;, which is used for panic handling.&lt;/p&gt;
 
 &lt;p&gt;By default, the destructors of all stack variables are run when a &lt;code&gt;panic&lt;/code&gt; occurs. This is called &lt;em&gt;unwinding&lt;/em&gt; and allows parent threads to &lt;a href=&#34;https://doc.rust-lang.org/book/concurrency.html#panics&#34;&gt;recover from panics&lt;/a&gt;. However, it requires a platform specific gcc library, which isn&amp;rsquo;t available in our kernel.&lt;/p&gt;
 
@@ -4559,6 +4559,16 @@ target/debug/libblog_os.a(core-35017696.0.o):
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;These &lt;a href=&#34;http://doc.crates.io/manifest.html#the-profile-sections&#34;&gt;profile sections&lt;/a&gt; specify options for &lt;code&gt;cargo build&lt;/code&gt; and &lt;code&gt;cargo release&lt;/code&gt;. By setting the &lt;code&gt;panic&lt;/code&gt; option to &lt;code&gt;abort&lt;/code&gt;, we disable all unwinding in our kernel.&lt;/p&gt;
+
+&lt;p&gt;However, there are still references to &lt;code&gt;_Unwind_Resume&lt;/code&gt; in the precompiled standard libraries. This might lead to linker errors when we use specific parts of &lt;code&gt;libcore&lt;/code&gt;. To avoid this, we create a dummy &lt;code&gt;_Unwind_Resume&lt;/code&gt; function that loops indefinitely&lt;sup class=&#34;footnote-ref&#34; id=&#34;fnref:fn-libcore-unwind&#34;&gt;&lt;a rel=&#34;footnote&#34; href=&#34;#fn:fn-libcore-unwind&#34;&gt;1&lt;/a&gt;&lt;/sup&gt;:&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;// in src/lib.rs&lt;/span&gt;
+
+&lt;span class=&#34;cp&#34;&gt;#[allow(non_snake_case)]&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+&lt;span class=&#34;cp&#34;&gt;#[no_mangle]&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+&lt;span class=&#34;k&#34;&gt;pub&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;k&#34;&gt;extern&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;s&#34;&gt;&amp;quot;C&amp;quot;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;k&#34;&gt;fn&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;n&#34;&gt;_Unwind_Resume&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;()&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;-&amp;gt;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;!&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;p&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+&lt;span class=&#34;w&#34;&gt;    &lt;/span&gt;&lt;span class=&#34;k&#34;&gt;loop&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;p&#34;&gt;{}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+&lt;span class=&#34;p&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
 &lt;p&gt;Now we fixed all linking issues and our kernel builds again. But instead of displaying &lt;code&gt;Hello World&lt;/code&gt;, it constantly reboots itself when we start it.&lt;/p&gt;
 
@@ -4697,6 +4707,15 @@ check_exception old: 0x8 new 0xd
 &lt;h2 id=&#34;what-s-next&#34;&gt;What&amp;rsquo;s next?&lt;/h2&gt;
 
 &lt;p&gt;Until now we write magic bits to some memory location when we want to print something to screen. In the &lt;a href=&#34;http://os.phil-opp.com/printing-to-screen.html&#34;&gt;next post&lt;/a&gt; we create a abstraction for the VGA text buffer that allows us to print strings in different colors and provides a simple interface.&lt;/p&gt;
+&lt;div class=&#34;footnotes&#34;&gt;
+
+&lt;hr /&gt;
+
+&lt;ol&gt;
+&lt;li id=&#34;fn:fn-libcore-unwind&#34;&gt;A better solution is to recompile &lt;code&gt;libcore&lt;/code&gt; with &lt;code&gt;panic=&amp;quot;abort&amp;quot;&lt;/code&gt;. We will do this in a future post.
+ &lt;a class=&#34;footnote-return&#34; href=&#34;#fnref:fn-libcore-unwind&#34;&gt;&lt;sup&gt;[return]&lt;/sup&gt;&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;/div&gt;
 </description>
     </item>
     

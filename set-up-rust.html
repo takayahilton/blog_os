@@ -238,7 +238,7 @@ target/debug/libblog_os.a(core-35017696.0.o):
 
 <p>Now everything should work again (the green <code>OKAY</code>). But there is another linking issue, which is triggered by some other example code.</p>
 
-<h3 id="panic-abort">panic == abort</h3>
+<h3 id="panic-abort">panic = &ldquo;abort&rdquo;</h3>
 
 <p>The following snippet still fails:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="w">    </span><span class="p">...</span><span class="w"></span>
@@ -255,7 +255,7 @@ target/debug/libblog_os.a(core-35017696.0.o):
     undefined reference to `_Unwind_Resume'
 </code></pre>
 
-<p>So the linker can&rsquo;t find a function named <code>_Unwind_Resume</code> that is referenced in <code>iter.rs:654</code> in libcore. This reference is not really there at <a href="https://github.com/rust-lang/rust/blob/b0ca03923359afc8df92a802b7cc1476a72fb2d0/src/libcore/iter.rs#L654">line 654 of libcore&rsquo;s <code>iter.rs</code></a>. Instead, it is a compiler inserted <em>landing pad</em>, which is used for panic handling by default.</p>
+<p>So the linker can&rsquo;t find a function named <code>_Unwind_Resume</code> that is referenced in <code>iter.rs:654</code> in libcore. This reference is not really there at <a href="https://github.com/rust-lang/rust/blob/b0ca03923359afc8df92a802b7cc1476a72fb2d0/src/libcore/iter.rs#L654">line 654 of libcore&rsquo;s <code>iter.rs</code></a>. Instead, it is a compiler inserted <em>landing pad</em>, which is used for panic handling.</p>
 
 <p>By default, the destructors of all stack variables are run when a <code>panic</code> occurs. This is called <em>unwinding</em> and allows parent threads to <a href="https://doc.rust-lang.org/book/concurrency.html#panics">recover from panics</a>. However, it requires a platform specific gcc library, which isn&rsquo;t available in our kernel.</p>
 
@@ -270,6 +270,16 @@ target/debug/libblog_os.a(core-35017696.0.o):
 </code></pre></div>
 
 <p>These <a href="http://doc.crates.io/manifest.html#the-profile-sections">profile sections</a> specify options for <code>cargo build</code> and <code>cargo release</code>. By setting the <code>panic</code> option to <code>abort</code>, we disable all unwinding in our kernel.</p>
+
+<p>However, there are still references to <code>_Unwind_Resume</code> in the precompiled standard libraries. This might lead to linker errors when we use specific parts of <code>libcore</code>. To avoid this, we create a dummy <code>_Unwind_Resume</code> function that loops indefinitely<sup class="footnote-ref" id="fnref:fn-libcore-unwind"><a rel="footnote" href="#fn:fn-libcore-unwind">1</a></sup>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+
+<span class="cp">#[allow(non_snake_case)]</span><span class="w"></span>
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">_Unwind_Resume</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
 
 <p>Now we fixed all linking issues and our kernel builds again. But instead of displaying <code>Hello World</code>, it constantly reboots itself when we start it.</p>
 
@@ -408,6 +418,15 @@ check_exception old: 0x8 new 0xd
 <h2 id="what-s-next">What&rsquo;s next?</h2>
 
 <p>Until now we write magic bits to some memory location when we want to print something to screen. In the <a href="/printing-to-screen.html">next post</a> we create a abstraction for the VGA text buffer that allows us to print strings in different colors and provides a simple interface.</p>
+<div class="footnotes">
+
+<hr />
+
+<ol>
+<li id="fn:fn-libcore-unwind">A better solution is to recompile <code>libcore</code> with <code>panic=&quot;abort&quot;</code>. We will do this in a future post.
+ <a class="footnote-return" href="#fnref:fn-libcore-unwind"><sup>[return]</sup></a></li>
+</ol>
+</div>
 
 </article>
 
