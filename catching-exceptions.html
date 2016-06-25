@@ -71,13 +71,17 @@
   <time datetime="2016-05-28" class="post-date">
     May 28, 2016
     
+      (updated on Jun 25, 2016)
+    
   </time>
 
   
 
-<p>In this post, we start exploring exceptions. We set up an interrupt descriptor table and add handler functions. At the end of this post, our kernel will be able to catch page faults.</p>
+<p>In this post, we start exploring exceptions. We set up an interrupt descriptor table and add handler functions. At the end of this post, our kernel will be able to catch divide-by-zero faults.</p>
 
 <p>As always, the complete source code is on <a href="https://github.com/phil-opp/blog_os/tree/catching_exceptions">Github</a>. Please file <a href="https://github.com/phil-opp/blog_os/issues">issues</a> for any problems, questions, or improvement suggestions. There is also a comment section at the end of this page.</p>
+
+<p><strong>Update</strong>: Due to a subtle <a href="https://github.com/phil-opp/blog_os/issues/184">stack alignment bug</a>, we no longer catch page faults in this post. Instead, we catch divide-by-zero errors.</p>
 
 <h2 id="exceptions">Exceptions</h2>
 
@@ -282,7 +286,7 @@
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">stack_index</span><span class="p">;</span><span class="w"></span>
 </code></pre></div>
 
-<p>Well, none of these variants is really <em>readable</em> and it&rsquo;s very easy to make mistakes somewhere. Therefore I created a <code>BitField</code> type with the following API:</p>
+<p>Well, none of these variants is really <em>readable</em> and it&rsquo;s very easy to make mistakes somewhere. Therefore I created a <code>BitField</code> type with the following <a href="https://doc.rust-lang.org/nightly/core/ops/struct.Range.html">Range</a>-based API:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="bp">self</span><span class="p">.</span><span class="mf">0.</span><span class="n">set_range</span><span class="p">(</span><span class="mi">0</span><span class="p">..</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="n">stack_index</span><span class="p">);</span><span class="w"></span>
 </code></pre></div>
 
@@ -533,18 +537,20 @@ note: ...but borrowed value is only valid for the block suffix following
 <span class="k">static</span><span class="w"> </span><span class="n">IDT</span><span class="o">:</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="o">::</span><span class="n">new</span><span class="p">();</span><span class="w"></span>
 
-<span class="w">    </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">divide_by_zero_handler</span><span class="p">);</span><span class="w"></span>
 
 <span class="w">    </span><span class="n">idt</span><span class="w"></span>
 <span class="p">};</span><span class="w"></span>
 
-<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
-<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;EXCEPTION: PAGE FAULT&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">divide_by_zero_handler</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;EXCEPTION: DIVIDE BY ZERO&quot;</span><span class="p">);</span><span class="w"></span>
 <span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
 
-<p>We register a single handler function for a page fault (index 14). The handler function just prints an error message and enters a <code>loop</code>. However, it doesn&rsquo;t work this way:</p>
+<p>We register a single handler function for a <a href="index 0">divide by zero error</a>. Like the name says, this exception occurs when dividing a number by 0. Thus we have an easy way to test our new exception handler.</p>
+
+<p>However, it doesn&rsquo;t work this way:</p>
 
 <pre><code>error: calls in statics are limited to constant functions, struct and enum
        constructors [E0015]
@@ -568,7 +574,7 @@ error: references in statics may only refer to immutable values [E0017]
 <span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">ref</span><span class="w"> </span><span class="n">IDT</span><span class="o">:</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="o">::</span><span class="n">new</span><span class="p">();</span><span class="w"></span>
 
-<span class="w">        </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">divide_by_zero_handler</span><span class="p">);</span><span class="w"></span>
 
 <span class="w">        </span><span class="n">idt</span><span class="w"></span>
 <span class="w">    </span><span class="p">};</span><span class="w"></span>
@@ -597,25 +603,71 @@ error: references in statics may only refer to immutable values [E0017]
 <span class="w">    </span><span class="c1">// initialize our IDT</span>
 <span class="w">    </span><span class="n">interrupts</span><span class="o">::</span><span class="n">init</span><span class="p">();</span><span class="w"></span>
 
-<span class="w">    </span><span class="c1">// provoke a page fault by writing to some random address</span>
-<span class="w">    </span><span class="k">unsafe</span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="mh">0xdeadbeaf</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// provoke a divide-by-zero fault</span>
+<span class="w">    </span><span class="mi">42</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
 
 <span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
 <span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
 
-<p>It works! We see a <code>EXCEPTION: PAGE FAULT</code> message at the bottom of our screen:</p>
+<p>When we run it, we get a runtime panic:</p>
 
-<p><img src="images/qemu-page-fault-println.png" alt="QEMU screenshot with `EXCEPTION: PAGE FAULT` message" /></p>
+<pre><code>PANIC in src/lib.rs at line 57:
+    attempted to divide by zero
+</code></pre>
 
-<p>Let&rsquo;s try something else:</p>
+<p>That&rsquo;s a not our exception handler. The reason is that Rust itself checks for a possible division by zero and panics in that case. So in order to raise a divide-by-zero error in the CPU, we need to bypass the Rust compiler somehow.</p>
+
+<h3 id="inline-assembly">Inline Assembly</h3>
+
+<p>In order to cause a divide-by-zero exception, we need to execute a <a href="http://x86.renejeschke.de/html/file_module_x86_id_72.html">div</a> or <a href="http://x86.renejeschke.de/html/file_module_x86_id_137.html">idiv</a> assembly instruction with operand 0. We could write a small assembly function and call it from our Rust code. An easier way is to use Rust&rsquo;s <a href="https://doc.rust-lang.org/book/inline-assembly.html">inline assembly</a> macro.</p>
+
+<p>Inline assembly allows us to write raw x86 assembly within a Rust function. The feature is unstable, so we need to add <code>#![feature(asm)]</code> to our <code>src/lib.rs</code>. Then we&rsquo;re able to write a <code>divide_by_zero</code> function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">fn</span><span class="w"> </span><span class="n">divide_by_zero</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">asm</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;mov dx, 0; div dx&quot;</span><span class="w"> </span><span class="o">:::</span><span class="w"> </span><span class="s">&quot;ax&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;dx&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;volatile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;intel&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Let&rsquo;s try to decode it:</p>
+
+<ul>
+<li>The <code>asm!</code> macro emits raw assembly instructions, so it&rsquo;s <code>unsafe</code> to use it.</li>
+<li>We insert two assembly instructions here: <code>mov dx, 0</code> and <code>div dx</code>. The former loads a 0 into the <code>dx</code> register (a subset of <code>rdx</code>) and the latter divides the <code>ax</code> register by <code>dx</code>. (The <code>div</code> instruction always implicitly operates on the <code>ax</code> register).</li>
+<li>The colons are separators. After the first <code>:</code> we could specify output operands and after the second <code>:</code> we could specify input operands. We need neither, so we leave these areas empty.</li>
+<li>After the third colon, we specify the so-called <em>clobbers</em>. These tell the compiler that our assembly modifies the values of some registers. Otherwise, the compiler assumes that the registers preserve their value. In our case, we clobber <code>dx</code> (we load 0 to it) and <code>ax</code> (the <code>div</code> instruction places the result in it).</li>
+<li>The last block (after the 4th colon) specifies some options. The <code>volatile</code> option tells the compiler: “This code has side effects. Do not delete it and do not move it elsewhere”. In our case, the “side effect” is the divide-by-zero exception. Finally, the <code>intel</code> option allows us to use the Intel assembly syntax instead of the default AT&amp;T syntax.</li>
+</ul>
+
+<p>Let&rsquo;s use our new <code>divide_by_zero</code> function to raise a CPU exception:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(...)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// provoke a divide-by-zero fault</span>
+<span class="w">    </span><span class="n">divide_by_zero</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>It works! We see a <code>EXCEPTION: DIVIDE BY ZERO</code> message at the bottom of our screen:</p>
+
+<p><img src="images/qemu-divide-error-println.png" alt="QEMU screenshot with `EXCEPTION: PAGE BY ZERO` message" /></p>
+
+<h3 id="exceptions-inside-println">Exceptions inside println</h3>
+
+<p>What happens when the exception occurs in the body of a <code>println</code>? Let&rsquo;s try:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(...)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
 <span class="w">    </span><span class="p">...</span><span class="w"></span>
 <span class="w">    </span><span class="n">interrupts</span><span class="o">::</span><span class="n">init</span><span class="p">();</span><span class="w"></span>
 
-<span class="w">    </span><span class="c1">// provoke a page fault inside println</span>
-<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="k">unsafe</span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="mh">0xdeadbeaf</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="w"> </span><span class="p">});</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// provoke a divide by zero fault inside println</span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">divide_by_zero</span><span class="p">());</span><span class="w"></span>
 
 <span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
 <span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
@@ -662,26 +714,26 @@ Remote debugging using :1234
     Writer&gt; (
     self=0x111230 &lt;blog_os::vga_buffer::WRITER::h702c3f466147ac3b&gt;)
     at /home/.../spin-0.3.5/src/mutex.rs:163
-#3  0x000000000010da59 in blog_os::interrupts::page_fault_handler ()
+#3  0x000000000010da59 in blog_os::interrupts::divide_by_zero_handler ()
     at src/vga_buffer.rs:31
 ...
 </code></pre>
 
-<p>Pretty verbose… but very useful. Let&rsquo;s clean it up a bit:</p>
+<p>Pretty verbose… and very useful. Let&rsquo;s clean it up a bit:</p>
 
 <ul>
 <li><code>spin::mutex::cpu_relax</code></li>
 <li><code>spin::mutex::obtain_lock&lt;vga_buffer::Writer&gt;</code></li>
 <li><code>spin::mutex::lock&lt;vga_buffer::Writer&gt;</code></li>
-<li><code>blog_os::interrupts::page_fault_handler</code></li>
+<li><code>blog_os::interrupts::divide_by_zero_handler</code></li>
 <li>&hellip;</li>
 </ul>
 
-<p>It&rsquo;s a <em>back</em>-trace, so it goes from the innermost function to the outermost function. We see that our page fault handler was called successfully. It then tried to write its error message. Therefore, it tried to <code>lock</code> the static <code>WRITER</code>, which in turn called <code>obtain_lock</code> and <code>cpu_relax</code>.</p>
+<p>It&rsquo;s a <em>back</em>-trace, so it goes from the innermost function to the outermost function. We see that our divide-by-zero handler was called successfully. It then tried to write its error message. Therefore, it tried to <code>lock</code> the static <code>WRITER</code>, which in turn called <code>obtain_lock</code> and <code>cpu_relax</code>.</p>
 
 <p>So our kernel tries to lock the output <code>WRITER</code>, which is already locked by the interrupted <code>println</code>. Thus, our exception handler waits forever and we don&rsquo;t see what error occurred. Yay, that&rsquo;s our first deadlock! :)</p>
 
-<p>(As you see, GDB can be very useful sometimes. For more GDB information check out our <a href="/set-up-gdb.html">Set Up GDB</a> page.)</p>
+<p>(As you see, GDB can be very useful sometimes. For more information about GDB check out our <a href="/set-up-gdb.html">Set Up GDB</a> page.)</p>
 
 <h2 id="printing-errors-reliably">Printing Errors Reliably</h2>
 
@@ -707,44 +759,28 @@ Remote debugging using :1234
 
 <p>This function clearly violates the invariants of the <code>vga_buffer</code> module, as it creates another <code>Unique</code> pointing to <code>0xb8000</code>. Thus, we deliberately introduce a data race on the VGA buffer. For this reason, the function is marked as <code>unsafe</code> and should only be used if absolutely necessary.</p>
 
-<p>However, the situation is not <em>that</em> bad. The VGA buffer only stores characters (no pointers) and we never rely on the buffer&rsquo;s values. So the function might cause mangled output, but should never be able to violate memory safety.</p>
+<p>However, the situation is not <em>that</em> bad. The VGA buffer only stores characters (no pointers) and we never rely on the buffer&rsquo;s values. So the function might cause mangled output, but should never be able to violate memory safety. Nevertheless, we will implement a better solution in a future post.</p>
 
 <h3 id="using-print-error">Using print_error</h3>
 
-<p>Let&rsquo;s use the new <code>print_error</code> function to print the page fault error:</p>
+<p>Let&rsquo;s use the new <code>print_error</code> function to print the divide-by-zero error:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
 
 <span class="kn">use</span><span class="w"> </span><span class="n">vga_buffer</span><span class="o">::</span><span class="n">print_error</span><span class="p">;</span><span class="w"></span>
 
-<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
-<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">print_error</span><span class="p">(</span><span class="n">format_args</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;EXCEPTION: PAGE FAULT&quot;</span><span class="p">))</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">divide_by_zero_handler</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">print_error</span><span class="p">(</span><span class="n">format_args</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;EXCEPTION: DIVIDE BY ZERO&quot;</span><span class="p">))</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
 <span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
 
 <p>We use the built-in <a href="https://doc.rust-lang.org/nightly/std/macro.format_args!.html">format_args</a> macro to translate the error string to a <code>fmt::Arguments</code> type. Now we should always see the error message, even if the exception occurred inside <code>println</code>:</p>
 
-<p><img src="images/qemu-page-fault-red.png" alt="QEMU screenshot with new red `EXCEPTION: PAGE FAULT` message" /></p>
+<p><img src="images/qemu-divide-error-red.png" alt="QEMU screenshot with new red `EXCEPTION: PAGE BY ZERO` message" /></p>
 
 <h2 id="what-s-next">What&rsquo;s next?</h2>
 
-<p>Now we&rsquo;re able to catch <em>almost</em> all page faults. However, some page faults still cause a triple fault and a bootloop. For example, try the following code:</p>
-<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(...)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
-<span class="w">    </span><span class="p">...</span><span class="w"></span>
-<span class="w">    </span><span class="n">interrupts</span><span class="o">::</span><span class="n">init</span><span class="p">();</span><span class="w"></span>
-
-<span class="w">    </span><span class="c1">// provoke a kernel stack overflow, which hits the guard page</span>
-<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">recursive</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
-<span class="w">        </span><span class="n">recursive</span><span class="p">();</span><span class="w"></span>
-<span class="w">    </span><span class="p">}</span><span class="w"></span>
-<span class="w">    </span><span class="n">recursive</span><span class="p">();</span><span class="w"></span>
-
-<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
-<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
-<span class="p">}</span><span class="w"></span>
-</code></pre></div>
-
-<p>The next post will explore and fix this triple fault by creating a double fault handler. After that, we should never again experience a triple fault in our kernel.</p>
+<p>We&rsquo;ve successfully caught our first exception! However, our <code>EXCEPTION: DIVIDE BY ZERO</code> message doesn&rsquo;t contain much information about the cause of the exception. The next post improves the situation by printing i.a. the current stack pointer and address of the causing instruction. We will also explore other exceptions such as page faults, for which the CPU pushes an <em>error code</em> on the stack.</p>
 <div class="footnotes">
 
 <hr />
