@@ -194,7 +194,9 @@ memory areas:
 
 <p>To merge these subsections, we need to update our linker script:</p>
 
-<pre><code>SECTIONS {
+<pre><code>ENTRY(start)
+
+SECTIONS {
     . = 1M;
 
     .boot :

@@ -3619,7 +3619,9 @@ memory areas:
 
 &lt;p&gt;To merge these subsections, we need to update our linker script:&lt;/p&gt;
 
-&lt;pre&gt;&lt;code&gt;SECTIONS {
+&lt;pre&gt;&lt;code&gt;ENTRY(start)
+
+SECTIONS {
     . = 1M;
 
     .boot :
