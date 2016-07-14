@@ -3439,7 +3439,7 @@ next free frame: Some(Frame { number: 3 })
 
 &lt;p&gt;So to fix our &lt;code&gt;unmap&lt;/code&gt; function, we need to remove the cached translation from the TLB. We can use Gerd Zellweger&amp;rsquo;s &lt;a href=&#34;https://github.com/gz/rust-x86&#34;&gt;x86&lt;/a&gt; crate to do this easily. To add it, we append the following to our &lt;code&gt;Cargo.toml&lt;/code&gt;:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-toml&#34; data-lang=&#34;toml&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;[&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;dependencies&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;.&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;x86&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;]&lt;/span&gt;
-&lt;span class=&#34;n&#34;&gt;version&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;=&lt;/span&gt; &lt;span class=&#34;s&#34;&gt;&amp;quot;0.6.0&amp;quot;&lt;/span&gt;
+&lt;span class=&#34;n&#34;&gt;version&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;=&lt;/span&gt; &lt;span class=&#34;s&#34;&gt;&amp;quot;0.7.1&amp;quot;&lt;/span&gt;
 &lt;span class=&#34;n&#34;&gt;default-features&lt;/span&gt; &lt;span class=&#34;o&#34;&gt;=&lt;/span&gt; &lt;span class=&#34;kc&#34;&gt;false&lt;/span&gt;
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
