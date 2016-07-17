@@ -22,6 +22,8 @@
 
 &lt;p&gt;In this post, we start exploring exceptions. We set up an interrupt descriptor table and add handler functions. At the end of this post, our kernel will be able to catch divide-by-zero faults.&lt;/p&gt;
 
+&lt;aside id=&#34;toc&#34;&gt;&lt;/aside&gt;
+
 &lt;p&gt;As always, the complete source code is on &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/catching_exceptions&#34;&gt;Github&lt;/a&gt;. Please file &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues&#34;&gt;issues&lt;/a&gt; for any problems, questions, or improvement suggestions. There is also a comment section at the end of this page.&lt;/p&gt;
 
 &lt;p&gt;&lt;strong&gt;Update&lt;/strong&gt;: Due to a subtle &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues/184&#34;&gt;stack alignment bug&lt;/a&gt;, we no longer catch page faults in this post. Instead, we catch divide-by-zero errors.&lt;/p&gt;
@@ -404,7 +406,7 @@
 
 &lt;p&gt;Then we pass a pointer to our &lt;code&gt;ptr&lt;/code&gt; structure to the &lt;code&gt;lidt&lt;/code&gt; function, which calls the &lt;code&gt;lidt&lt;/code&gt; assembly instruction in order to reload the IDT register. We need an unsafe block here, because the &lt;code&gt;lidt&lt;/code&gt; assumes that the specified handler addresses are valid.&lt;/p&gt;
 
-&lt;h3 id=&#34;safety&#34;&gt;Safety&lt;/h3&gt;
+&lt;h4 id=&#34;safety&#34;&gt;Safety&lt;/h4&gt;
 
 &lt;p&gt;But can we really guarantee that handler addresses are always valid? Let&amp;rsquo;s see:&lt;/p&gt;
 
@@ -439,7 +441,7 @@
 
 &lt;p&gt;Now imagine that the &lt;code&gt;cause_page_fault&lt;/code&gt; function declared an array of pointers instead. If the present was coincidentally set, the CPU would jump to some random pointer and interpret random memory as code. This would be a clear violation of memory safety.&lt;/p&gt;
 
-&lt;h3 id=&#34;fixing-the-load-method&#34;&gt;Fixing the load method&lt;/h3&gt;
+&lt;h4 id=&#34;fixing-the-load-method&#34;&gt;Fixing the load method&lt;/h4&gt;
 
 &lt;p&gt;So how do we fix it? We could make the load function itself &lt;code&gt;unsafe&lt;/code&gt; and push the unsafety to the caller. However, there is a much better solution in this case. In order to see it, we formulate the requirement for the &lt;code&gt;load&lt;/code&gt; method:&lt;/p&gt;
 
@@ -506,7 +508,7 @@ error: references in statics may only refer to immutable values [E0017]
 
 &lt;p&gt;The reason is that the Rust compiler is not able to evaluate the value of the &lt;code&gt;static&lt;/code&gt; at compile time. Maybe it will work someday when &lt;code&gt;const&lt;/code&gt; functions become more powerful. But until then, we have to find another solution.&lt;/p&gt;
 
-&lt;h3 id=&#34;lazy-statics-to-the-rescue&#34;&gt;Lazy Statics to the Rescue&lt;/h3&gt;
+&lt;h4 id=&#34;lazy-statics-to-the-rescue&#34;&gt;Lazy Statics to the Rescue&lt;/h4&gt;
 
 &lt;p&gt;Fortunately the &lt;code&gt;lazy_static&lt;/code&gt; macro exists. Instead of evaluating a &lt;code&gt;static&lt;/code&gt; at compile time, the macro performs the initialization when the &lt;code&gt;static&lt;/code&gt; is referenced the first time. Thus, we can do almost everything in the initialization block and are even able to read runtime values.&lt;/p&gt;
 
@@ -619,7 +621,7 @@ error: references in statics may only refer to immutable values [E0017]
 
 &lt;p&gt;Now the output ends on the &lt;code&gt;guard page&lt;/code&gt; line. No &lt;code&gt;EXCEPTION&lt;/code&gt; message and no &lt;code&gt;It did not crash&lt;/code&gt; message either. What&amp;rsquo;s happening?&lt;/p&gt;
 
-&lt;h3 id=&#34;debugging&#34;&gt;Debugging&lt;/h3&gt;
+&lt;h4 id=&#34;debugging&#34;&gt;Debugging&lt;/h4&gt;
 
 &lt;p&gt;Let&amp;rsquo;s debug it using &lt;a href=&#34;https://www.gnu.org/software/gdb/&#34;&gt;GDB&lt;/a&gt;. It is a console debugger and works with nearly everything, including QEMU. To make QEMU listen for a debugger connection, we start it with the &lt;code&gt;-s&lt;/code&gt; flag:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-Makefile&#34; data-lang=&#34;Makefile&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c&#34;&gt;# in `Makefile`&lt;/span&gt;
@@ -747,6 +749,8 @@ Remote debugging using :1234
       <description>
 
 &lt;p&gt;In the previous posts we have created a &lt;a href=&#34;http://os.phil-opp.com/allocating-frames.html&#34;&gt;frame allocator&lt;/a&gt; and a &lt;a href=&#34;http://os.phil-opp.com/modifying-page-tables.html&#34;&gt;page table module&lt;/a&gt;. Now we are ready to create a kernel heap and a memory allocator. Thus, we will unlock &lt;code&gt;Box&lt;/code&gt;, &lt;code&gt;Vec&lt;/code&gt;, &lt;code&gt;BTreeMap&lt;/code&gt;, and the rest of the &lt;a href=&#34;https://doc.rust-lang.org/nightly/alloc/index.html&#34;&gt;alloc&lt;/a&gt; and &lt;a href=&#34;https://doc.rust-lang.org/nightly/collections/index.html&#34;&gt;collections&lt;/a&gt; crates.&lt;/p&gt;
+
+&lt;aside id=&#34;toc&#34;&gt;&lt;/aside&gt;
 
 &lt;p&gt;As always, you can find the complete source code on &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/kernel_heap&#34;&gt;Github&lt;/a&gt;. Please file &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues&#34;&gt;issues&lt;/a&gt; for any problems, questions, or improvement suggestions. There is also a comment section at the end of this page.&lt;/p&gt;
 
@@ -1483,6 +1487,8 @@ in memory::init in src/memory/mod.rs:
       <description>
 
 &lt;p&gt;In this post we will create a new page table to map the kernel sections correctly. Therefor we will extend the paging module to support modifications of &lt;em&gt;inactive&lt;/em&gt; page tables as well. Then we will switch to the new table and secure our kernel stack by creating a guard page.&lt;/p&gt;
+
+&lt;aside id=&#34;toc&#34; class=&#34;coarse&#34;&gt;&lt;/aside&gt;
 
 &lt;p&gt;As always, you can find the source code on &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/remap_the_kernel&#34;&gt;Github&lt;/a&gt;. Don&amp;rsquo;t hesitate to file issues there if you have any problems or improvement suggestions. There is also a comment section at the end of this page. Note that this post requires a current Rust nightly.&lt;/p&gt;
 
@@ -2514,6 +2520,8 @@ check_exception old: 0xffffffff new 0xe
 
 &lt;p&gt;In this post we will create a paging module, which allows us to access and modify the 4-level page table. We will explore recursive page table mapping and use some Rust features to make it safe. Finally we will create functions to translate virtual addresses and to map and unmap pages.&lt;/p&gt;
 
+&lt;aside id=&#34;toc&#34; class=&#34;coarse&#34;&gt;&lt;/aside&gt;
+
 &lt;p&gt;You can find the source code and this post itself on &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/page_tables&#34;&gt;Github&lt;/a&gt;. Please file an issue there if you have any problems or improvement suggestions. There is also a comment section at the end of this page. Note that this post requires a current Rust nightly.&lt;/p&gt;
 
 &lt;h2 id=&#34;paging&#34;&gt;Paging&lt;/h2&gt;
@@ -3516,6 +3524,8 @@ next free frame: Some(Frame { number: 3 })
 
 &lt;p&gt;In this post we create an allocator that provides free physical frames for a future paging module. To get the required information about available and used memory we use the Multiboot information structure. Additionally, we improve the &lt;code&gt;panic&lt;/code&gt; handler to print the corresponding message and source line.&lt;/p&gt;
 
+&lt;aside id=&#34;toc&#34;&gt;&lt;/aside&gt;
+
 &lt;p&gt;The full source code is available on &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/allocating_frames&#34;&gt;Github&lt;/a&gt;. Feel free to open issues there if you have any problems or improvements. You can also leave a comment at the bottom.&lt;/p&gt;
 
 &lt;h2 id=&#34;preparation&#34;&gt;Preparation&lt;/h2&gt;
@@ -3920,6 +3930,8 @@ multiboot_start: 0x11d400, multiboot_end: 0x11d9c8
       <description>
 
 &lt;p&gt;In the &lt;a href=&#34;http://os.phil-opp.com/set-up-rust.html&#34;&gt;previous post&lt;/a&gt; we switched from assembly to &lt;a href=&#34;https://www.rust-lang.org/&#34;&gt;Rust&lt;/a&gt;, a systems programming language that provides great safety. But so far we are using unsafe features like &lt;a href=&#34;https://doc.rust-lang.org/book/raw-pointers.html&#34;&gt;raw pointers&lt;/a&gt; whenever we want to print to screen. In this post we will create a Rust module that provides a safe and easy-to-use interface for the VGA text buffer. It will support Rust&amp;rsquo;s &lt;a href=&#34;https://doc.rust-lang.org/std/fmt/#related-macros&#34;&gt;formatting macros&lt;/a&gt;, too.&lt;/p&gt;
+
+&lt;aside id=&#34;toc&#34;&gt;&lt;/aside&gt;
 
 &lt;p&gt;This post uses recent unstable features, so you need an up-to-date nighly compiler. If you have any questions, problems, or suggestions please &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues&#34;&gt;file an issue&lt;/a&gt; or create a comment at the bottom. The code from this post is also available on &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/printing_to_screen&#34;&gt;Github&lt;/a&gt;.&lt;/p&gt;
 
@@ -4418,6 +4430,8 @@ multiboot_start: 0x11d400, multiboot_end: 0x11d9c8
 
 &lt;p&gt;In the previous posts we created a &lt;a href=&#34;http://os.phil-opp.com/multiboot-kernel.html&#34;&gt;minimal Multiboot kernel&lt;/a&gt; and &lt;a href=&#34;http://os.phil-opp.com/entering-longmode.html&#34;&gt;switched to Long Mode&lt;/a&gt;. Now we can finally switch to &lt;a href=&#34;https://www.rust-lang.org/&#34;&gt;Rust&lt;/a&gt; code. Rust is a high-level language without runtime. It allows us to not link the standard library and write bare metal code. Unfortunately the setup is not quite hassle-free yet.&lt;/p&gt;
 
+&lt;aside id=&#34;toc&#34;&gt;&lt;/aside&gt;
+
 &lt;p&gt;This blog post tries to set up Rust step-by-step and point out the different problems. If you have any questions, problems, or suggestions please &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues&#34;&gt;file an issue&lt;/a&gt; or create a comment at the bottom. The code from this post is in a &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/set_up_rust&#34;&gt;Github repository&lt;/a&gt;, too.&lt;/p&gt;
 
 &lt;p&gt;&lt;strong&gt;Update&lt;/strong&gt;: We now use the &lt;code&gt;panic=abort&lt;/code&gt; cargo option instead of &lt;code&gt;-Z no-landing-pads&lt;/code&gt;. See &lt;a href=&#34;https://github.com/phil-opp/blog_os/pull/170&#34;&gt;#170&lt;/a&gt;.&lt;/p&gt;
@@ -4778,6 +4792,8 @@ check_exception old: 0x8 new 0xd
       <description>
 
 &lt;p&gt;In the &lt;a href=&#34;http://os.phil-opp.com/multiboot-kernel.html&#34;&gt;previous post&lt;/a&gt; we created a minimal multiboot kernel. It just prints &lt;code&gt;OK&lt;/code&gt; and hangs. The goal is to extend it and call 64-bit &lt;a href=&#34;https://www.rust-lang.org/&#34;&gt;Rust&lt;/a&gt; code. But the CPU is currently in &lt;a href=&#34;https://en.wikipedia.org/wiki/Protected_mode&#34;&gt;protected mode&lt;/a&gt; and allows only 32-bit instructions and up to 4GiB memory. So we need to set up &lt;em&gt;Paging&lt;/em&gt; and switch to the 64-bit &lt;a href=&#34;https://en.wikipedia.org/wiki/Long_mode&#34;&gt;long mode&lt;/a&gt; first.&lt;/p&gt;
+
+&lt;aside id=&#34;toc&#34;&gt;&lt;/aside&gt;
 
 &lt;p&gt;I tried to explain everything in detail and to keep the code as simple as possible. If you have any questions, suggestions, or issues, please leave a comment or &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues&#34;&gt;create an issue&lt;/a&gt; on Github. The source code is available in a &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/entering_longmode/src/arch/x86_64&#34;&gt;repository&lt;/a&gt;, too.&lt;/p&gt;
 
@@ -5425,6 +5441,8 @@ The Global Descriptor Table (GDT) was used for &lt;em&gt;Segmentation&lt;/em&gt;
       <description>
 
 &lt;p&gt;This post explains how to create a minimal x86 operating system kernel. In fact, it will just boot and print &lt;code&gt;OK&lt;/code&gt; to the screen. The following blog posts we will extend it using the &lt;a href=&#34;http://www.rust-lang.org/&#34;&gt;Rust&lt;/a&gt; programming language.&lt;/p&gt;
+
+&lt;aside id=&#34;toc&#34;&gt;&lt;/aside&gt;
 
 &lt;p&gt;I tried to explain everything in detail and to keep the code as simple as possible. If you have any questions, suggestions or other issues, please leave a comment or &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues&#34;&gt;create an issue&lt;/a&gt; on Github. The source code is available in a &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/multiboot_bootstrap/src/arch/x86_64&#34;&gt;repository&lt;/a&gt;, too.&lt;/p&gt;
 

@@ -79,6 +79,8 @@
 
 <p>In this post, we start exploring exceptions. We set up an interrupt descriptor table and add handler functions. At the end of this post, our kernel will be able to catch divide-by-zero faults.</p>
 
+<aside id="toc"></aside>
+
 <p>As always, the complete source code is on <a href="https://github.com/phil-opp/blog_os/tree/catching_exceptions">Github</a>. Please file <a href="https://github.com/phil-opp/blog_os/issues">issues</a> for any problems, questions, or improvement suggestions. There is also a comment section at the end of this page.</p>
 
 <p><strong>Update</strong>: Due to a subtle <a href="https://github.com/phil-opp/blog_os/issues/184">stack alignment bug</a>, we no longer catch page faults in this post. Instead, we catch divide-by-zero errors.</p>
@@ -461,7 +463,7 @@
 
 <p>Then we pass a pointer to our <code>ptr</code> structure to the <code>lidt</code> function, which calls the <code>lidt</code> assembly instruction in order to reload the IDT register. We need an unsafe block here, because the <code>lidt</code> assumes that the specified handler addresses are valid.</p>
 
-<h3 id="safety">Safety</h3>
+<h4 id="safety">Safety</h4>
 
 <p>But can we really guarantee that handler addresses are always valid? Let&rsquo;s see:</p>
 
@@ -496,7 +498,7 @@
 
 <p>Now imagine that the <code>cause_page_fault</code> function declared an array of pointers instead. If the present was coincidentally set, the CPU would jump to some random pointer and interpret random memory as code. This would be a clear violation of memory safety.</p>
 
-<h3 id="fixing-the-load-method">Fixing the load method</h3>
+<h4 id="fixing-the-load-method">Fixing the load method</h4>
 
 <p>So how do we fix it? We could make the load function itself <code>unsafe</code> and push the unsafety to the caller. However, there is a much better solution in this case. In order to see it, we formulate the requirement for the <code>load</code> method:</p>
 
@@ -563,7 +565,7 @@ error: references in statics may only refer to immutable values [E0017]
 
 <p>The reason is that the Rust compiler is not able to evaluate the value of the <code>static</code> at compile time. Maybe it will work someday when <code>const</code> functions become more powerful. But until then, we have to find another solution.</p>
 
-<h3 id="lazy-statics-to-the-rescue">Lazy Statics to the Rescue</h3>
+<h4 id="lazy-statics-to-the-rescue">Lazy Statics to the Rescue</h4>
 
 <p>Fortunately the <code>lazy_static</code> macro exists. Instead of evaluating a <code>static</code> at compile time, the macro performs the initialization when the <code>static</code> is referenced the first time. Thus, we can do almost everything in the initialization block and are even able to read runtime values.</p>
 
@@ -676,7 +678,7 @@ error: references in statics may only refer to immutable values [E0017]
 
 <p>Now the output ends on the <code>guard page</code> line. No <code>EXCEPTION</code> message and no <code>It did not crash</code> message either. What&rsquo;s happening?</p>
 
-<h3 id="debugging">Debugging</h3>
+<h4 id="debugging">Debugging</h4>
 
 <p>Let&rsquo;s debug it using <a href="https://www.gnu.org/software/gdb/">GDB</a>. It is a console debugger and works with nearly everything, including QEMU. To make QEMU listen for a debugger connection, we start it with the <code>-s</code> flag:</p>
 <div class="highlight"><pre><code class="language-Makefile" data-lang="Makefile"><span></span><span class="c"># in `Makefile`</span>

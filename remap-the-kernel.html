@@ -79,6 +79,8 @@
 
 <p>In this post we will create a new page table to map the kernel sections correctly. Therefor we will extend the paging module to support modifications of <em>inactive</em> page tables as well. Then we will switch to the new table and secure our kernel stack by creating a guard page.</p>
 
+<aside id="toc" class="coarse"></aside>
+
 <p>As always, you can find the source code on <a href="https://github.com/phil-opp/blog_os/tree/remap_the_kernel">Github</a>. Don&rsquo;t hesitate to file issues there if you have any problems or improvement suggestions. There is also a comment section at the end of this page. Note that this post requires a current Rust nightly.</p>
 
 <p><em>Updates</em>:</p>

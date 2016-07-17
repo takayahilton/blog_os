@@ -79,6 +79,8 @@
 
 <p>In the previous posts we created a <a href="/multiboot-kernel.html">minimal Multiboot kernel</a> and <a href="/entering-longmode.html">switched to Long Mode</a>. Now we can finally switch to <a href="https://www.rust-lang.org/">Rust</a> code. Rust is a high-level language without runtime. It allows us to not link the standard library and write bare metal code. Unfortunately the setup is not quite hassle-free yet.</p>
 
+<aside id="toc"></aside>
+
 <p>This blog post tries to set up Rust step-by-step and point out the different problems. If you have any questions, problems, or suggestions please <a href="https://github.com/phil-opp/blog_os/issues">file an issue</a> or create a comment at the bottom. The code from this post is in a <a href="https://github.com/phil-opp/blog_os/tree/set_up_rust">Github repository</a>, too.</p>
 
 <p><strong>Update</strong>: We now use the <code>panic=abort</code> cargo option instead of <code>-Z no-landing-pads</code>. See <a href="https://github.com/phil-opp/blog_os/pull/170">#170</a>.</p>
