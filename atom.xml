@@ -1488,7 +1488,7 @@ in memory::init in src/memory/mod.rs:
 
 &lt;p&gt;In this post we will create a new page table to map the kernel sections correctly. Therefor we will extend the paging module to support modifications of &lt;em&gt;inactive&lt;/em&gt; page tables as well. Then we will switch to the new table and secure our kernel stack by creating a guard page.&lt;/p&gt;
 
-&lt;aside id=&#34;toc&#34; class=&#34;coarse&#34;&gt;&lt;/aside&gt;
+&lt;aside id=&#34;toc&#34;&gt;&lt;/aside&gt;
 
 &lt;p&gt;As always, you can find the source code on &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/remap_the_kernel&#34;&gt;Github&lt;/a&gt;. Don&amp;rsquo;t hesitate to file issues there if you have any problems or improvement suggestions. There is also a comment section at the end of this page. Note that this post requires a current Rust nightly.&lt;/p&gt;
 
@@ -2520,7 +2520,7 @@ check_exception old: 0xffffffff new 0xe
 
 &lt;p&gt;In this post we will create a paging module, which allows us to access and modify the 4-level page table. We will explore recursive page table mapping and use some Rust features to make it safe. Finally we will create functions to translate virtual addresses and to map and unmap pages.&lt;/p&gt;
 
-&lt;aside id=&#34;toc&#34; class=&#34;coarse&#34;&gt;&lt;/aside&gt;
+&lt;aside id=&#34;toc&#34;&gt;&lt;/aside&gt;
 
 &lt;p&gt;You can find the source code and this post itself on &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/page_tables&#34;&gt;Github&lt;/a&gt;. Please file an issue there if you have any problems or improvement suggestions. There is also a comment section at the end of this page. Note that this post requires a current Rust nightly.&lt;/p&gt;
 
