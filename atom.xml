@@ -5563,7 +5563,7 @@ The Global Descriptor Table (GDT) was used for &lt;em&gt;Segmentation&lt;/em&gt;
 &lt;li&gt;&lt;code&gt;global&lt;/code&gt; exports a label (makes it public). As &lt;code&gt;start&lt;/code&gt; will be the entry point of our kernel, it needs to be public.&lt;/li&gt;
 &lt;li&gt;the &lt;code&gt;.text&lt;/code&gt; section is the default section for executable code&lt;/li&gt;
 &lt;li&gt;&lt;code&gt;bits 32&lt;/code&gt; specifies that the following lines are 32-bit instructions. It&amp;rsquo;s needed because the CPU is still in &lt;a href=&#34;https://en.wikipedia.org/wiki/Protected_mode&#34;&gt;Protected mode&lt;/a&gt; when GRUB starts our kernel. When we switch to &lt;a href=&#34;https://en.wikipedia.org/wiki/Long_mode&#34;&gt;Long mode&lt;/a&gt; in the &lt;a href=&#34;http://os.phil-opp.com/entering-longmode.html&#34;&gt;next post&lt;/a&gt; we can use &lt;code&gt;bits 64&lt;/code&gt; (64-bit instructions).&lt;/li&gt;
-&lt;li&gt;the &lt;code&gt;mov dword&lt;/code&gt; instruction moves the 32bit constant &lt;code&gt;0x2f4f2f4b&lt;/code&gt; to the memory at address &lt;code&gt;b8000&lt;/code&gt; (it prints &lt;code&gt;OK&lt;/code&gt; to the screen, an explanation follows in the next posts)&lt;/li&gt;
+&lt;li&gt;the &lt;code&gt;mov dword&lt;/code&gt; instruction moves the 32bit constant &lt;code&gt;0x2f4b2f4f&lt;/code&gt; to the memory at address &lt;code&gt;b8000&lt;/code&gt; (it prints &lt;code&gt;OK&lt;/code&gt; to the screen, an explanation follows in the next posts)&lt;/li&gt;
 &lt;li&gt;&lt;code&gt;hlt&lt;/code&gt; is the halt instruction and causes the CPU to stop&lt;/li&gt;
 &lt;/ul&gt;
 

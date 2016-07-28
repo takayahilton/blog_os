@@ -198,7 +198,7 @@
 <li><code>global</code> exports a label (makes it public). As <code>start</code> will be the entry point of our kernel, it needs to be public.</li>
 <li>the <code>.text</code> section is the default section for executable code</li>
 <li><code>bits 32</code> specifies that the following lines are 32-bit instructions. It&rsquo;s needed because the CPU is still in <a href="https://en.wikipedia.org/wiki/Protected_mode">Protected mode</a> when GRUB starts our kernel. When we switch to <a href="https://en.wikipedia.org/wiki/Long_mode">Long mode</a> in the <a href="/entering-longmode.html">next post</a> we can use <code>bits 64</code> (64-bit instructions).</li>
-<li>the <code>mov dword</code> instruction moves the 32bit constant <code>0x2f4f2f4b</code> to the memory at address <code>b8000</code> (it prints <code>OK</code> to the screen, an explanation follows in the next posts)</li>
+<li>the <code>mov dword</code> instruction moves the 32bit constant <code>0x2f4b2f4f</code> to the memory at address <code>b8000</code> (it prints <code>OK</code> to the screen, an explanation follows in the next posts)</li>
 <li><code>hlt</code> is the halt instruction and causes the CPU to stop</li>
 </ul>
 
