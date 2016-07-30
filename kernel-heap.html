@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <meta http-equiv="X-Frame-Options" content="sameorigin">
+  
+  
+
+  <title>
+    Kernel Heap &middot; Writing an OS in Rust
+  </title>
+
+  <link rel="canonical" href="http://os.phil-opp.com/kernel-heap.html">
+
+  
+  <link rel="stylesheet" href="/css/poole.css">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/syntax.css">
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/images/apple-touch-icon-precomposed.png">
+  <link rel="shortcut icon" href="/images/favicon.ico">
+
+  
+
+  <script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-65296949-1', 'auto');
+  ga('send', 'pageview');
+
+</script>
+
+</head>
+
+<body>
+<div class="container content">
+
+<header class="masthead">
+  <h3 class="masthead-title">
+    <a href="/" title="Home">Writing an OS in Rust</a>
+    <span class="navigation">
+      <small><a href="/atom.xml"><img src="/images/feed-icon.png" alt="RSS"></a></small>
+    </span>
+    <small>Philipp&nbsp;Oppermann's&nbsp;blog</small>
+  </h3>
+</header>
+
+<main>
+
+
+<article class="post">
+  <h1 class="post-title">Kernel Heap</h1>
+  <time datetime="2016-04-11" class="post-date">
+    Apr 11, 2016
+    
+  </time>
+
+  
+
+<p>In the previous posts we have created a <a href="/allocating-frames.html">frame allocator</a> and a <a href="/modifying-page-tables.html">page table module</a>. Now we are ready to create a kernel heap and a memory allocator. Thus, we will unlock <code>Box</code>, <code>Vec</code>, <code>BTreeMap</code>, and the rest of the <a href="https://doc.rust-lang.org/nightly/alloc/index.html">alloc</a> and <a href="https://doc.rust-lang.org/nightly/collections/index.html">collections</a> crates.</p>
+
+<p>As always, you can find the complete source code on <a href="https://github.com/phil-opp/blog_os/tree/kernel_heap">Github</a>. Please file <a href="https://github.com/phil-opp/blog_os/issues">issues</a> for any problems, questions, or improvement suggestions. There is also a comment section at the end of this page.</p>
+
+<h2 id="introduction">Introduction</h2>
+
+<p>The <em>heap</em> is the memory area for long-lived allocations. The programmer can access it by using types like <a href="http://rustbyexample.com/std/box.html">Box</a> or <a href="https://doc.rust-lang.org/book/vectors.html">Vec</a>. Behind the scenes, the compiler manages that memory by inserting calls to some memory allocator. By default, Rust links to the <a href="http://www.canonware.com/jemalloc/">jemalloc</a> allocator (for binaries) or the system allocator (for libraries). However, both rely on <a href="https://en.wikipedia.org/wiki/System_call">system calls</a> such as <a href="https://en.wikipedia.org/wiki/Sbrk">sbrk</a> and are thus unusable in our kernel. So we need to create and link our own allocator.</p>
+
+<p>A good allocator is fast and reliable. It also effectively utilizes the available memory and keeps <a href="https://en.wikipedia.org/wiki/Fragmentation_(computing)">fragmentation</a> low. Furthermore, it works well for concurrent applications and scales to any number of processors. It even optimizes the memory layout with respect to the CPU caches to improve <a href="http://docs.cray.com/books/S-2315-50/html-S-2315-50/qmeblljm.html">cache locality</a> and avoid <a href="http://mechanical-sympathy.blogspot.de/2011/07/false-sharing.html">false sharing</a>.</p>
+
+<p>These requirements make good allocators pretty complex. For example, <a href="http://www.canonware.com/jemalloc/">jemalloc</a> has over 30.000 lines of code. This complexity is out of scope for our kernel, so we will create a much simpler allocator. However, it should suffice for the foreseeable future, since we&rsquo;ll allocate only when it&rsquo;s absolutely necessary.</p>
+
+<h2 id="a-bump-allocator">A Bump Allocator</h2>
+
+<p>For our own allocator, we start simple. We create an allocator crate in a new <code>libs</code> subfolder:</p>
+<div class="highlight"><pre><code class="language-shell" data-lang="shell"><span></span>&gt; mkdir libs
+&gt; <span class="nb">cd</span> libs
+&gt; cargo new bump_allocator
+&gt; <span class="nb">cd</span> bump_allocator
+</code></pre></div>
+
+<p>Our allocator is very basic. It only keeps track of the next free address:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/bump_allocator/src/lib.rs</span>
+
+<span class="cp">#![feature(const_fn)]</span><span class="w"></span>
+
+<span class="cp">#[derive(Debug)]</span><span class="w"></span>
+<span class="k">struct</span><span class="w"> </span><span class="n">BumpAllocator</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">heap_start</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">heap_size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">next</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">BumpAllocator</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="sd">/// Create a new allocator, which uses the memory in the</span>
+<span class="w">    </span><span class="sd">/// range [heap_start, heap_start + heap_size).</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">(</span><span class="n">heap_start</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">heap_size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">BumpAllocator</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">BumpAllocator</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">heap_start</span><span class="o">:</span><span class="w"> </span><span class="n">heap_start</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">heap_size</span><span class="o">:</span><span class="w"> </span><span class="n">heap_size</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">next</span><span class="o">:</span><span class="w"> </span><span class="n">heap_start</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="sd">/// Allocates a block of memory with the given size and alignment.</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">allocate</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    	</span><span class="kd">let</span><span class="w"> </span><span class="n">alloc_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">align_up</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">next</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">alloc_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">alloc_start</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">size</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="n">alloc_end</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">heap_start</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">heap_size</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">next</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">alloc_end</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="nb">Some</span><span class="p">(</span><span class="n">alloc_start</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nb">None</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>heap_start</code> and <code>heap_size</code> fields just contain the start address and size of our kernel heap. The <code>next</code> field contains the next free address and is increased after every allocation. To <code>allocate</code> a memory block we align the <code>next</code> address using the <code>align_up</code> function (decribed below). Then we add up the desired <code>size</code> and make sure that we don&rsquo;t exceed the end of the heap. If everything goes well, we update the <code>next</code> address and return a pointer to the start address of the allocation. Else, we return <code>None</code>.</p>
+
+<p>Note that we need to add a feature flag at the beginning of the file, because we&rsquo;ve marked the <code>new</code> function as <code>const</code>. <a href="https://github.com/rust-lang/rust/issues/24111">Const functions</a> are unstable, so we need to add the <code>#![feature(const_fn)]</code> flag.</p>
+
+<h3 id="alignment">Alignment</h3>
+
+<p>In order to simplify alignment, we add <code>align_down</code> and <code>align_up</code> functions:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="sd">/// Align downwards. Returns the greatest x with alignment `align`</span>
+<span class="sd">/// so that x &lt;= addr. The alignment must be a power of 2.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">align_down</span><span class="p">(</span><span class="n">addr</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">align</span><span class="p">.</span><span class="n">is_power_of_two</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">addr</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="o">!</span><span class="p">(</span><span class="n">align</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">align</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">addr</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">panic</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;`align` must be a power of 2&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="sd">/// Align upwards. Returns the smallest x with alignment `align`</span>
+<span class="sd">/// so that x &gt;= addr. The alignment must be a power of 2.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">align_up</span><span class="p">(</span><span class="n">addr</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">align_down</span><span class="p">(</span><span class="n">addr</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">align</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Let&rsquo;s start with <code>align_down</code>: If the alignment is a valid power of two (i.e. in <code>{1,2,4,8,…}</code>), we use some bit-fiddling to return the aligned address. It works because every power of two has exactly one bit set in its binary representation. For example, the numbers <code>{1,2,4,8,…}</code> are <code>{1,10,100,1000,…}</code> in binary. By subtracting 1 we get <code>{0,01,011,0111,…}</code>. These binary numbers have a <code>1</code> at exactly the positions that need to be zeroed in <code>addr</code>. For example, the last 3 bits need to be zeroed for a alignment of 8.</p>
+
+<p>To align <code>addr</code>, we create a <a href="https://en.wikipedia.org/wiki/Mask_(computing)">bitmask</a> from <code>align-1</code>. We want a <code>0</code> at the position of each <code>1</code>, so we invert it using <code>!</code>. After that, the binary numbers look like this: <code>{…11111,…11110,…11100,…11000,…}</code>. Finally, we zero the correct bits using a binary <code>AND</code>.</p>
+
+<p>Aligning upwards is simple now. We just increase <code>addr</code> by <code>align-1</code> and call <code>align_down</code>. We add <code>align-1</code> instead of <code>align</code> because we would otherwise waste <code>align</code> bytes for already aligned addresses.</p>
+
+<h3 id="deallocate">Deallocate</h3>
+
+<p>But how do we deallocate memory in our bump allocator? Well, we don&rsquo;t ;). We just leak all freed memory for now. Thus our allocator quickly runs out of memory in a real system. On the other hand, it&rsquo;s as fast as an allocator can get: It just increases a single variable when allocating and does nothing at all when deallocating. And RAM is cheap nowadays, right? :)</p>
+
+<p>(Don&rsquo;t worry, we will introduce a better allocator later in this post.)</p>
+
+<h3 id="custom-allocators-in-rust">Custom Allocators in Rust</h3>
+
+<p>In order to use our crate as system allocator, we add some attributes at the beginning of the file:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/bump_allocator/src/lib.rs</span>
+
+<span class="cp">#![feature(allocator)]</span><span class="w"></span>
+
+<span class="cp">#![allocator]</span><span class="w"></span>
+<span class="cp">#![no_std]</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>#![allocator]</code> attribute tells the compiler that it should not link a default allocator when this crate is linked. The attribute is unstable and feature-gated, so we need to add <code>#![feature(allocator)]</code> as well. Allocator crates must not depend on <a href="https://doc.rust-lang.org/nightly/alloc/index.html">liballoc</a>, because this would introduce a circular dependency. Thus, allocator crates can&rsquo;t use the standard library either (as it depends on <code>liballoc</code>). Therefore all allocator crates must be marked as <code>#![no_std]</code>.</p>
+
+<p>According to <a href="https://doc.rust-lang.org/book/custom-allocators.html">the book</a>, an allocator crate needs to implement the following five functions:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_allocate</span><span class="p">(</span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_usable_size</span><span class="p">(</span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_deallocate</span><span class="p">(</span><span class="n">ptr</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_reallocate</span><span class="p">(</span><span class="n">ptr</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">new_size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">                                </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_reallocate_inplace</span><span class="p">(</span><span class="n">ptr</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">                                        </span><span class="n">new_size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"></span>
+<span class="w">                                        </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+</code></pre></div>
+
+<p>These functions are highly unstable and the compiler does not check their types. So make sure that the type, number, and order of parameters are correct when you implement it.</p>
+
+<p>Let&rsquo;s look at each function individually:</p>
+
+<ul>
+<li>The <code>__rust_allocate</code> function allocates a block of memory with the given size (in bytes) and alignment. <em>Alignment</em> means that the start address of the allocation needs to be a multiple of the <code>align</code> parameter. This is required because some CPUs can only access e.g. 4 byte aligned addresses. The alignment is always a power of 2.</li>
+<li>The <code>__rust_usable_size</code> returns the usable size of an allocation created with the specified size and alignment. The usable size is at least <code>size</code>, but might be larger if the allocator uses fixed block sizes. For example, a <a href="https://en.wikipedia.org/wiki/Buddy_memory_allocation">buddy allocator</a> rounds the size of each allocation to the next power of two.</li>
+<li>The <code>__rust_deallocate</code> function frees the memory block referenced <code>ptr</code> again. The <code>size</code> and <code>align</code> parameters contain the values that were used to create the allocation. Thus the allocator knows exactly how much memory it needs to free. In constrast, the <a href="http://www.cplusplus.com/reference/cstdlib/free/">free function</a> of C only has a single <code>ptr</code> argument. So a C allocator needs to <a href="http://stackoverflow.com/questions/1518711/how-does-free-know-how-much-to-free">maintain information</a> about the size of each block itself. In Rust, the compiler maintains this information for us.</li>
+<li>The <code>__rust_reallocate</code> function changes the size of the block referenced by <code>ptr</code> from <code>size</code> to <code>new_size</code>. If it&rsquo;s possible to do in in-place, the function resizes the block and returns <code>ptr</code> again. Else, it allocates a new block of <code>new_size</code> and copies the memory contents from the old block. Then it frees the old block and returns the pointer to the new block.</li>
+<li>The <code>__rust_reallocate_inplace</code> function tries to change the size of the block referenced by <code>ptr</code> from <code>size</code> to <code>new_size</code> without relocating the memory block. If it succeeds, it returns <code>usable_size(new_size, align)</code>, else it returns <code>usable_size(size, align)</code>.</li>
+</ul>
+
+<p>A more detailed documentation for these functions can be found in the <a href="https://doc.rust-lang.org/nightly/alloc/heap/">API docs for alloc::heap</a>. Note that all of these functions and custom allocators in general are <em>unstable</em> (as indicated by the <code>allocator</code> feature gate).</p>
+
+<h3 id="implementation">Implementation</h3>
+
+<p>Let&rsquo;s implement the allocation functions using our new allocator. First we need a way to access the allocator. The functions do not know anything about our allocator, so we can only access it through a <code>static</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/bump_allocator/src/lib.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">spin</span><span class="o">::</span><span class="n">Mutex</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">spin</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">HEAP_START</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mo">0o_000_001_000_000_0000</span><span class="p">;</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">HEAP_SIZE</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">;</span><span class="w"> </span><span class="c1">// 100 KiB</span>
+
+<span class="k">static</span><span class="w"> </span><span class="n">BUMP_ALLOCATOR</span><span class="o">:</span><span class="w"> </span><span class="n">Mutex</span><span class="o">&lt;</span><span class="n">BumpAllocator</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Mutex</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="n">BumpAllocator</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">HEAP_START</span><span class="p">,</span><span class="w"> </span><span class="n">HEAP_SIZE</span><span class="p">));</span><span class="w"></span>
+</code></pre></div>
+
+<p>We use <code>0o_000_001_000_000_0000</code> as heap start address, which is the address starting at the second <code>P3</code> entry. It doesn&rsquo;t really matter which address we choose here as long as it&rsquo;s unused. We use a heap size of 100 KiB, which should be large enough for the near future. The static allocator is protected by a spinlock since we need to able to modify it. Our allocator crate is distinct from our main crate, so we need to add the <code>spin</code> dependency to its <code>Cargo.toml</code> as well. The easiest way is to run <code>cargo add spin</code> (using the <a href="https://github.com/killercup/cargo-edit">cargo-edit</a> crate).</p>
+
+<p>Now we can easily implement the <code>__rust_allocate</code> and <code>__rust_deallocate</code> functions:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/bump_allocator/src/lib.rs</span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_allocate</span><span class="p">(</span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">BUMP_ALLOCATOR</span><span class="p">.</span><span class="n">lock</span><span class="p">().</span><span class="n">allocate</span><span class="p">(</span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="p">).</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;out of memory&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_deallocate</span><span class="p">(</span><span class="n">_ptr</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">_size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">_align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// just leak it</span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We use <code>expect</code> to panic in out of memory (OOM) situations. We could alternatively return a null pointer, which indicates an OOM situation to the Rust runtime. However, the runtime would react by aborting the process. On Linux, the abort function intentionally raises an <a href="http://wiki.osdev.org/Exceptions#Invalid_Opcode">invalid opcode</a> exception, which would lead to a boot loop for our kernel. So panickying is a better solution for our kernel.</p>
+
+<p>We never allocate more memory than requested, so the <code>__rust_usable_size</code> function is simple:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_usable_size</span><span class="p">(</span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">_align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">size</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>In order to keep things simple, we don&rsquo;t support the <code>__rust_reallocate_inplace</code> function and always return the old size:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_reallocate_inplace</span><span class="p">(</span><span class="n">_ptr</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">_new_size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">_align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">size</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now only <code>__rust_reallocate</code> is left. It&rsquo;s a bit more difficult, since we need to copy the contents of the old allocation to the new allocation. However, we can just steal some code from the official <a href="https://github.com/rust-lang/rust/blob/c66d2380a810c9a2b3dbb4f93a830b101ee49cc2/src/liballoc_system/lib.rs#L98-L101">reallocate implementation for unix</a>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_reallocate</span><span class="p">(</span><span class="n">ptr</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">new_size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">                                </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="p">{</span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="n">cmp</span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// from: https://github.com/rust-lang/rust/blob/</span>
+<span class="w">    </span><span class="c1">//     c66d2380a810c9a2b3dbb4f93a830b101ee49cc2/</span>
+<span class="w">    </span><span class="c1">//     src/liballoc_system/lib.rs#L98-L101</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">new_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__rust_allocate</span><span class="p">(</span><span class="n">new_size</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ptr</span><span class="o">::</span><span class="n">copy</span><span class="p">(</span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="n">new_ptr</span><span class="p">,</span><span class="w"> </span><span class="n">cmp</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">new_size</span><span class="p">))</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="n">__rust_deallocate</span><span class="p">(</span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">new_ptr</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>That&rsquo;s it! We have successfully created a custom allocator. Now we&rsquo;re ready to test it.</p>
+
+<h2 id="box-vec-and-friends">Box, Vec, and Friends</h2>
+
+<p>In order to use our new allocator we import it in our main project:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs of our main project</span>
+
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">bump_allocator</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>Additionally, we need to tell cargo where our <code>bump_allocator</code> crate lives:</p>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="c1"># in Cargo.toml of our main project</span>
+
+<span class="p">[</span><span class="n">dependencies</span><span class="p">.</span><span class="n">bump_allocator</span><span class="p">]</span>
+<span class="n">path</span> <span class="o">=</span> <span class="s">&quot;libs/bump_allocator&quot;</span>
+</code></pre></div>
+
+<p>Now we&rsquo;re able to import the <code>alloc</code> and <code>collections</code> crates in order to unlock <code>Box</code>, <code>Vec</code>, <code>BTreeMap</code>, and friends:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs of our main project</span>
+
+<span class="cp">#![feature(alloc, collections)]</span><span class="w"></span>
+
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">bump_allocator</span><span class="p">;</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">alloc</span><span class="p">;</span><span class="w"></span>
+<span class="cp">#[macro_use]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">collections</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>collections</code> crate provides the <a href="//doc.rust-lang.org/nightly/collections/macro.format!.html">format!</a> and <a href="https://doc.rust-lang.org/nightly/collections/macro.vec!.html">vec!</a> macros, so we use <code>#[macro_use]</code> to import them.</p>
+
+<h2 id="testing">Testing</h2>
+
+<p>Now we should be able to allocate memory on the heap. Let&rsquo;s try it in our <code>rust_main</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in rust_main in src/lib.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">alloc</span><span class="o">::</span><span class="n">boxed</span><span class="o">::</span><span class="nb">Box</span><span class="p">;</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">heap_test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Box</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mi">42</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+
+<p>When we try to compile it using <code>make run</code>, we get several linker errors about a function named <code>_Unwind_Resume</code>:</p>
+<div class="highlight"><pre><span></span>target/x86_64-unknown-linux-gnu/debug/libblog_os.a(bump_allocator-[…].0.o):
+    In function `bump_allocator::__rust_allocate&#39;:
+/home/…/blog_os/libs/bump_allocator/src/lib.rs:19:
+    undefined reference to `_Unwind_Resume&#39;
+</pre></div>
+
+<p>This function is part of Rust&rsquo;s unwinding machinery. We disabled most of by passing <code>-Z no-landing-pads</code> to rustc, but apparently some panic related code still links to it. The new “<a href="https://github.com/rust-lang/rust/issues/32837">panic as abort</a>” feature might fix this.</p>
+
+<p>To work around this issue for now, we add a dummy function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/bump_allocator/src/lib.rs</span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">_Unwind_Resume</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>This is just a temporary fix to keep this post simple. The next post will resolve this issue in a better way using a new build setup.</p>
+
+<p>Now our kernel compiles again. But when we run it, a triple fault occurs and causes permanent rebooting. We use QEMU for debugging as described <a href="http://os.phil-opp.com/remap-the-kernel.html#debugging">in the previous post</a>:</p>
+<div class="highlight"><pre><span></span>&gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
+…
+check_exception old: 0xffffffff new 0xe
+     0: v=0e e=0002 i=0 cpl=0 IP=0008:0000000000102860 pc=0000000000102860
+        SP=0010:0000000000116af0 CR2=0000000040000000
+…
+</pre></div>
+
+<p>Aha! It&rsquo;s a <a href="`v=0e`">page fault</a> and was caused by the code at <code>0x102860</code>. The code tried to write (<code>e=0002</code>) to address <code>0x40000000</code>. This address is <code>0o_000_001_000_000_0000</code> in octal, which is the <code>HEAP_START</code> address defined above. Of course it page-faults: We have forgotten to map the heap memory to some physical memory.</p>
+
+<h3 id="some-refactoring">Some Refactoring</h3>
+
+<p>In order to map the heap cleanly, we do a bit of refactoring first. We move all memory initialization from our <code>rust_main</code> to a new <code>memory::init</code> function. Now our <code>rust_main</code> looks like this:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(</span><span class="n">multiboot_information_address</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// ATTENTION: we have a very small stack and no guard page</span>
+<span class="w">    </span><span class="n">vga_buffer</span><span class="o">::</span><span class="n">clear_screen</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Hello World{}&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;!&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">boot_info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">multiboot2</span><span class="o">::</span><span class="n">load</span><span class="p">(</span><span class="n">multiboot_information_address</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="n">enable_nxe_bit</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">enable_write_protect_bit</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// set up guard page and map the heap pages</span>
+<span class="w">    </span><span class="n">memory</span><span class="o">::</span><span class="n">init</span><span class="p">(</span><span class="n">boot_info</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">alloc</span><span class="o">::</span><span class="n">boxed</span><span class="o">::</span><span class="nb">Box</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">heap_test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Box</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mi">42</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>memory::init</code> function looks like this:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/mod.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">multiboot2</span><span class="o">::</span><span class="n">BootInformation</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">init</span><span class="p">(</span><span class="n">boot_info</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BootInformation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">memory_map_tag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">boot_info</span><span class="p">.</span><span class="n">memory_map_tag</span><span class="p">().</span><span class="n">expect</span><span class="p">(</span><span class="w"></span>
+<span class="w">        </span><span class="s">&quot;Memory map tag required&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">boot_info</span><span class="p">.</span><span class="n">elf_sections_tag</span><span class="p">().</span><span class="n">expect</span><span class="p">(</span><span class="w"></span>
+<span class="w">        </span><span class="s">&quot;Elf sections tag required&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">kernel_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="p">.</span><span class="n">sections</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">filter</span><span class="p">(</span><span class="o">|</span><span class="n">s</span><span class="o">|</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">is_allocated</span><span class="p">()).</span><span class="n">map</span><span class="p">(</span><span class="o">|</span><span class="n">s</span><span class="o">|</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">addr</span><span class="p">).</span><span class="n">min</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">kernel_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="p">.</span><span class="n">sections</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">filter</span><span class="p">(</span><span class="o">|</span><span class="n">s</span><span class="o">|</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">is_allocated</span><span class="p">()).</span><span class="n">map</span><span class="p">(</span><span class="o">|</span><span class="n">s</span><span class="o">|</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">addr</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">size</span><span class="p">).</span><span class="n">max</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;kernel start: {:#x}, kernel end: {:#x}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">             </span><span class="n">kernel_start</span><span class="p">,</span><span class="w"></span>
+<span class="w">             </span><span class="n">kernel_end</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;multiboot start: {:#x}, multiboot end: {:#x}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">             </span><span class="n">boot_info</span><span class="p">.</span><span class="n">start_address</span><span class="p">(),</span><span class="w"></span>
+<span class="w">             </span><span class="n">boot_info</span><span class="p">.</span><span class="n">end_address</span><span class="p">());</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">frame_allocator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">AreaFrameAllocator</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="w"></span>
+<span class="w">        </span><span class="n">kernel_start</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">kernel_end</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">boot_info</span><span class="p">.</span><span class="n">start_address</span><span class="p">(),</span><span class="w"> </span><span class="n">boot_info</span><span class="p">.</span><span class="n">end_address</span><span class="p">(),</span><span class="w"></span>
+<span class="w">        </span><span class="n">memory_map_tag</span><span class="p">.</span><span class="n">memory_areas</span><span class="p">());</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">paging</span><span class="o">::</span><span class="n">remap_the_kernel</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">frame_allocator</span><span class="p">,</span><span class="w"> </span><span class="n">boot_info</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We&rsquo;ve just moved the code to a new function. However, we&rsquo;ve sneaked some improvements in:</p>
+
+<ul>
+<li>An additional <code>.filter(|s| s.is_allocated())</code> in the calculation of <code>kernel_start</code> and <code>kernel_end</code>. This ignores all sections that aren&rsquo;t loaded to memory (such as debug sections). Thus, the kernel end address is no longer artifically increased by such sections.</li>
+<li>We use the <code>start_address()</code> and <code>end_address()</code> methods of <code>boot_info</code> instead of calculating the adresses manually.</li>
+<li>We use the alternate <code>{:#x}</code> form when printing kernel/multiboot addresses. Before, we used <code>0x{:x}</code>, which leads to the same result. For a complete list of these “alternate” formatting forms, check out the <a href="https://doc.rust-lang.org/nightly/std/fmt/index.html#sign0">std::fmt documentation</a>.</li>
+</ul>
+
+<h3 id="safety">Safety</h3>
+
+<p>It is important that the <code>memory::init</code> function is called only once, because it creates a new frame allocator based on kernel and multiboot start/end. When we call it a second time, a new frame allocator is created that reassigns the same frames, even if they are already in use.</p>
+
+<p>In the second call it would use an identical frame allocator to remap the kernel. The <code>remap_the_kernel</code> function would request a frame from the frame allocator to create a new page table. But the returned frame is already in use, since we used it to create our current page table in the first call. In order to initialize the new table, the function zeroes it. This is the point where everything breaks, since we zero our current page table. The CPU is unable to read the next instruction  and throws a page fault.</p>
+
+<p>So we need to ensure that <code>memory::init</code> can be only called once. We could mark it as <code>unsafe</code>, which would bring it in line with Rust&rsquo;s memory safety rules. However, that would just push the unsafety to the caller. The caller can still accidentally call the function twice, the only difference is that the mistake needs to happen inside <code>unsafe</code> blocks.</p>
+
+<p>A better solution is to insert a check at the function&rsquo;s beginning, that panics if the function is called a second time. This approach has a small runtime cost, but we only call it once, so it&rsquo;s negligible. And we avoid two <code>unsafe</code> blocks (one at the calling site and one at the function itself), which is always good.</p>
+
+<p>In order to make such checks easy, I created a small crate named <a href="https://crates.io/crates/once">once</a>. To add it, we run <code>cargo add once</code> and add the following to our <code>src/lib.rs</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+
+<span class="cp">#[macro_use]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="kr">once</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>The crate provides an <a href="https://phil-opp.rustdocs.org/once/macro.assert_has_not_been_called!.html">assert_has_not_been_called!</a> macro (sorry for the long name :D). We can use it to fix the safety problem easily:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/mod.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">init</span><span class="p">(</span><span class="n">boot_info</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BootInformation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">assert_has_not_been_called</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;memory::init must be called only once&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">memory_map_tag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>That&rsquo;s it. Now our <code>memory::init</code> function can only be called once. The macro works by creating a static <a href="https://doc.rust-lang.org/nightly/core/sync/atomic/struct.AtomicBool.html">AtomicBool</a> named <code>CALLED</code>, which is initialized to <code>false</code>. When the macro is invoked, it checks the value of <code>CALLED</code> and sets it to <code>true</code>. If the value was already <code>true</code> before, the macro panics.</p>
+
+<h3 id="mapping-the-heap">Mapping the Heap</h3>
+
+<p>Now we&rsquo;re ready to map the heap pages. In order to do it, we need access to the <code>ActivePageTable</code> or <code>Mapper</code> instance (see the [previous post]). Therefore we return it from the <code>paging::remap_the_kernel</code> function:</p>
+
+<p>[previous post]: {{ page.previous.url }}</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/paging/mod.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">remap_the_kernel</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">,</span><span class="w"> </span><span class="n">boot_info</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BootInformation</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="c1">// new</span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;guard page at {:#x}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">old_p4_page</span><span class="p">.</span><span class="n">start_address</span><span class="p">());</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">active_table</span><span class="w"> </span><span class="c1">// new</span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we have full page table access in the <code>memory::init</code> function. This allows us to map the heap pages to physical frames:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/mod.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">init</span><span class="p">(</span><span class="n">boot_info</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BootInformation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">frame_allocator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">...;</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// below is the new part</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">active_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">paging</span><span class="o">::</span><span class="n">remap_the_kernel</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">frame_allocator</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">boot_info</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">Page</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">bump_allocator</span><span class="o">::</span><span class="p">{</span><span class="n">HEAP_START</span><span class="p">,</span><span class="w"> </span><span class="n">HEAP_SIZE</span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">heap_start_page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Page</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">HEAP_START</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">heap_end_page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Page</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">HEAP_START</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">HEAP_SIZE</span><span class="o">-</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">page</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">Page</span><span class="o">::</span><span class="n">range_inclusive</span><span class="p">(</span><span class="n">heap_start_page</span><span class="p">,</span><span class="w"> </span><span class="n">heap_end_page</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">active_table</span><span class="p">.</span><span class="n">map</span><span class="p">(</span><span class="n">page</span><span class="p">,</span><span class="w"> </span><span class="n">paging</span><span class="o">::</span><span class="n">WRITABLE</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">frame_allocator</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>Page::range_inclusive</code> function is just a copy of the <code>Frame::range_inclusive</code> function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/paging/mod.rs</span>
+
+<span class="cp">#[derive(…, PartialEq, Eq, PartialOrd, Ord)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Page</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Page</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">range_inclusive</span><span class="p">(</span><span class="n">start</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"> </span><span class="n">end</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">PageIter</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">PageIter</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">start</span><span class="o">:</span><span class="w"> </span><span class="n">start</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">end</span><span class="o">:</span><span class="w"> </span><span class="n">end</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">PageIter</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">start</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">end</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="nb">Iterator</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">PageIter</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span><span class="w"> </span><span class="n">Item</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Page</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">next</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Page</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">start</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">end</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">start</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">start</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="nb">Some</span><span class="p">(</span><span class="n">page</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nb">None</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we map the whole heap to physical pages. This needs some time and might introduce a noticeable delay when we increase the heap size in the future. Another drawback is that we consume a large amount of physical frames even though we might not need the whole heap space. We will fix these problems in a future post by mapping the pages lazily.</p>
+
+<h3 id="it-works">It works!</h3>
+
+<p>Now <code>Box</code> and <code>Vec</code> should work. For example:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in rust_main in src/lib.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">alloc</span><span class="o">::</span><span class="n">boxed</span><span class="o">::</span><span class="nb">Box</span><span class="p">;</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">heap_test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Box</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mi">42</span><span class="p">);</span><span class="w"></span>
+<span class="o">*</span><span class="n">heap_test</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="mi">15</span><span class="p">;</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">heap_test2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Box</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="s">&quot;hello&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{:?} {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">heap_test</span><span class="p">,</span><span class="w"> </span><span class="n">heap_test2</span><span class="p">);</span><span class="w"></span>
+
+<span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">vec_test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">vec</span><span class="o">!</span><span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="mi">3</span><span class="p">,</span><span class="mi">4</span><span class="p">,</span><span class="mi">5</span><span class="p">,</span><span class="mi">6</span><span class="p">,</span><span class="mi">7</span><span class="p">];</span><span class="w"></span>
+<span class="n">vec_test</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="p">;</span><span class="w"></span>
+<span class="k">for</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="o">&amp;</span><span class="n">vec_test</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">print</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{} &quot;</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We can also use all other types of the <code>alloc</code> and <code>collections</code> crates, including:</p>
+
+<ul>
+<li>the reference counted pointers <a href="https://doc.rust-lang.org/nightly/alloc/rc/">Rc</a> and <a href="https://doc.rust-lang.org/nightly/alloc/arc/">Arc</a></li>
+<li>the owned string type <a href="https://doc.rust-lang.org/nightly/collections/string/struct.String.html">String</a> and the <a href="//doc.rust-lang.org/nightly/collections/macro.format!.html">format!</a> macro</li>
+<li><a href="https://doc.rust-lang.org/nightly/collections/linked_list/struct.LinkedList.html">Linked List</a></li>
+<li>the growable ring buffer <a href="https://doc.rust-lang.org/nightly/collections/vec_deque/struct.VecDeque.html">VecDeque</a></li>
+<li><a href="https://doc.rust-lang.org/nightly/collections/binary_heap/struct.BinaryHeap.html">BinaryHeap</a></li>
+<li><a href="https://doc.rust-lang.org/nightly/collections/btree_map/struct.BTreeMap.html">BTreeMap</a> and <a href="https://doc.rust-lang.org/nightly/collections/btree_set/struct.BTreeSet.html">BTreeSet</a></li>
+</ul>
+
+<h2 id="a-better-allocator">A better Allocator</h2>
+
+<p>Right now, we leak every freed memory block. Thus, we run out of memory quickly, for example, by creating a new <code>String</code> in each iteration of a loop:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in rust_main in src/lib.rs</span>
+
+<span class="k">for</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mi">0</span><span class="p">..</span><span class="mi">10000</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">format</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Some String&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>To fix this, we need to create an allocator that keeps track of freed memory blocks and reuses them if possible. This introduces some challenges:</p>
+
+<ul>
+<li>We need to keep track of a possibly unlimited number of freed blocks. For example, an application could allocate <code>n</code> one-byte sized blocks and free every second block, which creates <code>n/2</code> freed blocks. We can&rsquo;t rely on any upper bound of freed block since <code>n</code> could be arbitrarily large.</li>
+<li>We can&rsquo;t use any of the collections from above, since they rely on allocations themselves. (It might be possible as soon as <a href="https://github.com/rust-lang/rfcs/blob/master/text/1398-kinds-of-allocators.md">RFC #1398</a> is <a href="https://github.com/rust-lang/rust/issues/32838">implemented</a>, which allows user-defined allocators for specific collection instances.)</li>
+<li>We need to merge adjacent freed blocks if possible. Otherwise, the freed memory is no longer usable for large allocations. We will discuss this point in more detail below.</li>
+<li>Our allocator should search the set of freed blocks quickly and keep fragmentation low.</li>
+</ul>
+
+<h3 id="creating-a-list-of-freed-blocks">Creating a List of freed Blocks</h3>
+
+<p>Where do we store the information about an unlimited number of freed blocks? We can&rsquo;t use any fixed size data structure since it could always be too small for some allocation sequences. So we need some kind of dynamically growing set.</p>
+
+<p>One possible solution could be to use an array-like data structure that starts at some unused virtual address. If the array becomes full, we increase its size and map new physical frames as backing storage. This approach would require a large part of the virtual address space since the array could grow significantly. We would need to create a custom implementation of a growable array and manipulate the page tables when deallocating. It would also consume a possibly large number of physical frames as backing storage.</p>
+
+<p>We will choose another solution with different tradoffs. It&rsquo;s not clearly “better” than the approach above and has significant disadvantages itself. However, it has one big advantage: It does not need any additional physical or virtual memory at all. This makes it less complex since we don&rsquo;t need to manipulate any page tables. The idea is the following:</p>
+
+<p>A freed memory block is not used anymore and no one needs the stored information. It is still mapped to a virtual address and backed by a physical page. So we just store the information about the freed block <em>in the block itself</em>.  We keep a pointer to the first block and store a pointer to the next block in each block. Thus, we create a single linked list:</p>
+
+<p><img src="/images/linked-list-allocator/overview.svg" alt="Linked List Allocator" /></p>
+
+<p>In the following, we call a freed block a <em>hole</em>. Each hole stores its size and a pointer to the next hole. If a hole is larger than needed, we leave the remaining memory unused. By storing a pointer to the first hole, we are able to traverse the complete list.</p>
+
+<h4 id="initialization">Initialization</h4>
+
+<p>When the heap is created, all of its memory is unused. Thus, it forms a single large hole:</p>
+
+<p><img src="/images/linked-list-allocator/initialization.svg" alt="Heap Initialization" /></p>
+
+<p>The optional pointer to the next hole is set to <code>None</code>.</p>
+
+<h4 id="allocation">Allocation</h4>
+
+<p>In order to allocate a block of memory, we need to find a hole that satisfies the size and alignment requirements. If the found hole is larger than required, we split it into two smaller holes. For example, when we allocate a 24 byte block right after initialization, we split the single hole into a hole of size 24 and a hole with the remaining size:</p>
+
+<p><img src="/images/linked-list-allocator/split-hole.svg" alt="split hole" /></p>
+
+<p>Then we use the new 24 byte hole to perform the allocation:</p>
+
+<p><img src="/images/linked-list-allocator/allocate.svg" alt="24 bytes allocated" /></p>
+
+<p>To find a suitable hole, we can use several search strategies:</p>
+
+<ul>
+<li><strong>best fit</strong>: Search the whole list and choose the <em>smallest</em> hole that satisfies the requirements.</li>
+<li><strong>worst fit</strong>: Search the whole list and choose the <em>largest</em> hole that satisfies the requirements.</li>
+<li><strong>first fit</strong>: Search the list from the beginning and choose the <em>first</em> hole that satisfies the requirements.</li>
+</ul>
+
+<p>Each strategy has its advantages and disadvantages. Best fit uses the smallest hole possible and leaves larger holes for large allocations. But splitting the smallest hole might create a tiny hole, which is too small for most allocations. In contrast, the worst fit strategy always chooses the largest hole. Thus, it does not create tiny holes, but it consumes the large block, which might be required for large allocations.</p>
+
+<p>For our use case, the best fit strategy is better than worst fit. The reason is that we have a minimal hole size of 16 bytes, since each hole needs to be able to store a size (8 bytes) and a pointer to the next hole (8 bytes). Thus, even the best fit strategy leads to holes of usable size. Furthermore, we will need to allocate very large blocks occasionally (e.g. for <a href="https://en.wikipedia.org/wiki/Direct_memory_access">DMA</a> buffers).</p>
+
+<p>However, both best fit and worst fit have a significant problem: They need to scan the whole list for each allocation in order to find the optimal block. This leads to long allocation times if the list is long. The first fit strategy does not have this problem, as it returns as soon as it finds a suitable hole. It is fairly fast for small allocations and might only need to scan the whole list for large allocations.</p>
+
+<h4 id="deallocation">Deallocation</h4>
+
+<p>To deallocate a block of memory, we can just insert its corresponding hole somewhere into the list. However, we need to merge adjacent holes. Otherwise, we are unable to reuse the freed memory for larger allocations. For example:</p>
+
+<p><img src="/images/linked-list-allocator/deallocate.svg" alt="deallocate memory, which leads to adjacent holes" /></p>
+
+<p>In order to use these adjacent holes for a large allocation, we need to merge them to a single large hole first:</p>
+
+<p><img src="/images/linked-list-allocator/merge-holes-and-allocate.svg" alt="merge adjacent holes and allocate large block" /></p>
+
+<p>The easiest way to ensure that adjacent holes are always merged, is to keep the hole list sorted by address. Thus, we only need to check the predecessor and the successor in the list when we free a memory block. If they are adjacent to the freed block, we merge the corresponding holes. Else, we insert the freed block as a new hole at the correct position.</p>
+
+<h3 id="implementation-1">Implementation</h3>
+
+<p>The detailed implementation would go beyond the scope of this post, since it contains several hidden difficulties. For example:</p>
+
+<ul>
+<li>Several merge cases: Merge with the previous hole, merge with the next hole, merge with both holes.</li>
+<li>We need to satisfy the alignment requirements, which requires additional splitting logic.</li>
+<li>The minimal hole size of 16 bytes: We must not create smaller holes when splitting a hole.</li>
+</ul>
+
+<p>I created the <a href="https://crates.io/crates/linked_list_allocator">linked_list_allocator</a> crate to handle all of these cases. It consists of a <a href="http://phil-opp.github.io/linked-list-allocator/linked_list_allocator/struct.Heap.html">Heap struct</a> that provides an <code>allocate_first_fit</code> and a <code>deallocate</code> method. If you are interested in the implementation details, check out the <a href="https://github.com/phil-opp/linked-list-allocator">source code</a>.</p>
+
+<p>So we just need to implement Rust&rsquo;s allocation modules and integrate it into our kernel. We start by creating a new <code>hole_list_allocator</code><sup class="footnote-ref" id="fnref:1"><a rel="footnote" href="#fn:1">1</a></sup> crate inside the <code>libs</code> directory:</p>
+<div class="highlight"><pre><code class="language-shell" data-lang="shell"><span></span>&gt; <span class="nb">cd</span> libs
+&gt; cargo new hole_list_allocator
+&gt; <span class="nb">cd</span> hole_list_allocator
+</code></pre></div>
+
+<p>We add the <code>allocator</code> and <code>no_std</code> attributes to <code>src/lib.rs</code> like described above:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/hole_list_allocator/src/lib.rs</span>
+
+<span class="cp">#![feature(allocator)]</span><span class="w"></span>
+
+<span class="cp">#![allocator]</span><span class="w"></span>
+<span class="cp">#![no_std]</span><span class="w"></span>
+</code></pre></div>
+
+<p>We also add a static allocator protected by a spinlock, but this time we use the <code>Heap</code> type of the <code>linked_list_allocator</code> crate:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/hole_list_allocator/src/lib.rs</span>
+
+<span class="cp">#![feature(const_fn)]</span><span class="w"></span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">spin</span><span class="o">::</span><span class="n">Mutex</span><span class="p">;</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">linked_list_allocator</span><span class="o">::</span><span class="n">Heap</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">spin</span><span class="p">;</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">linked_list_allocator</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">HEAP_START</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mo">0o_000_001_000_000_0000</span><span class="p">;</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">HEAP_SIZE</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">;</span><span class="w"> </span><span class="c1">// 100 KiB</span>
+
+<span class="k">static</span><span class="w"> </span><span class="n">HEAP</span><span class="o">:</span><span class="w"> </span><span class="n">Mutex</span><span class="o">&lt;</span><span class="n">Heap</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Mutex</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">Heap</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">HEAP_START</span><span class="p">,</span><span class="w"> </span><span class="n">HEAP_SIZE</span><span class="p">));</span><span class="w"></span>
+</code></pre></div>
+
+<p>Note that we use the same values for <code>HEAP_START</code> and <code>HEAP_SIZE</code> as in the <code>bump_allocator</code>.</p>
+
+<p>We need to add the extern crates to our <code>Cargo.toml</code>:</p>
+<div class="highlight"><pre><code class="language-shell" data-lang="shell"><span></span>&gt; cargo add spin
+&gt; cargo add linked_list_allocator
+</code></pre></div>
+
+<p>However, we get an error when we try to compile it:</p>
+<div class="highlight"><pre><span></span><span class="n">error</span><span class="o">:</span> <span class="kd">function</span> <span class="n">calls</span> <span class="k">in</span> <span class="n">statics</span> <span class="n">are</span> <span class="n">limited</span> <span class="n">to</span> <span class="n">constant</span> <span class="n">functions</span><span class="o">,</span>
+   <span class="n">struct</span> <span class="n">and</span> <span class="n">enum</span> <span class="n">constructors</span> <span class="o">[</span><span class="n">E0015</span><span class="o">]</span>
+<span class="kd">static</span> <span class="n">HEAP</span><span class="o">:</span> <span class="n">Mutex</span><span class="o">&lt;</span><span class="n">Heap</span><span class="o">&gt;</span> <span class="o">=</span> <span class="n">Mutex</span><span class="o">::</span><span class="k">new</span><span class="o">(</span><span class="n">Heap</span><span class="o">::</span><span class="k">new</span><span class="o">(</span><span class="n">HEAP_START</span><span class="o">,</span> <span class="n">HEAP_SIZE</span><span class="o">));</span>
+                                      <span class="o">^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~</span>
+</pre></div>
+
+<p>The reason is that the <code>Heap::new</code> function needs to initialize the first hole (like described <a href="#initialization">above</a>). This can&rsquo;t be done at compile time, so the function can&rsquo;t be a <code>const</code> function. Therefore we can&rsquo;t use it to initialize a static.</p>
+
+<p>There is an easy solution for crates with access to the standard library: <a href="https://github.com/rust-lang-nursery/lazy-static.rs">lazy-static</a>. It automatically initializes the static when it&rsquo;s used the first time. However, it relies on the <code>std::sync::once</code> module and is thus unusable in our kernel. I couldn&rsquo;t find any alternatives for <code>#![no_std]</code> crates, so I&rsquo;ve tried to port it. The results are part of the <a href="https://crates.io/crates/once">once</a> crate, which we already used above. I&rsquo;ve created it quite recently and haven&rsquo;t tested it much, so be careful when using it. Please <a href="https://github.com/phil-opp/rust-once/issues">report</a> any issues you find!</p>
+
+<p>Let&rsquo;s use the ported <code>lazy_static!</code> macro to fix our <code>hole_list_allocator</code>:</p>
+<div class="highlight"><pre><code class="language-shell" data-lang="shell"><span></span>&gt; cargo add once
+</code></pre></div>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/hole_list_allocator/src/lib.rs</span>
+
+<span class="cp">#[macro_use]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="kr">once</span><span class="p">;</span><span class="w"></span>
+
+<span class="n">lazy_static</span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">ref</span><span class="w"> </span><span class="n">HEAP</span><span class="o">:</span><span class="w"> </span><span class="n">Mutex</span><span class="o">&lt;</span><span class="n">Heap</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Mutex</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">Heap</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">HEAP_START</span><span class="p">,</span><span class="w"> </span><span class="n">HEAP_SIZE</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">});</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>unsafe</code> block is required since <code>Heap::new</code> is <code>unsafe</code>. It&rsquo;s unsafe because it assumes that <code>HEAP_START</code> is a valid and unused address.</p>
+
+<p>Now we can implement the allocation functions:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/hole_list_allocator/src/lib.rs</span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_allocate</span><span class="p">(</span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">HEAP</span><span class="p">.</span><span class="n">lock</span><span class="p">().</span><span class="n">allocate_first_fit</span><span class="p">(</span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="p">).</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;out of memory&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_deallocate</span><span class="p">(</span><span class="n">ptr</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">HEAP</span><span class="p">.</span><span class="n">lock</span><span class="p">().</span><span class="n">deallocate</span><span class="p">(</span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="p">)</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The remaining functions are implemented like above:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/hole_list_allocator/src/lib.rs</span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_usable_size</span><span class="p">(</span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">_align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">size</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_reallocate_inplace</span><span class="p">(</span><span class="n">_ptr</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">_new_size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">_align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">size</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">__rust_reallocate</span><span class="p">(</span><span class="n">ptr</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">new_size</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">                                </span><span class="n">align</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="p">{</span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="n">cmp</span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// from: https://github.com/rust-lang/rust/blob/</span>
+<span class="w">    </span><span class="c1">//     c66d2380a810c9a2b3dbb4f93a830b101ee49cc2/</span>
+<span class="w">    </span><span class="c1">//     src/liballoc_system/lib.rs#L98-L101</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">new_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">__rust_allocate</span><span class="p">(</span><span class="n">new_size</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ptr</span><span class="o">::</span><span class="n">copy</span><span class="p">(</span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="n">new_ptr</span><span class="p">,</span><span class="w"> </span><span class="n">cmp</span><span class="o">::</span><span class="n">min</span><span class="p">(</span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">new_size</span><span class="p">))</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="n">__rust_deallocate</span><span class="p">(</span><span class="n">ptr</span><span class="p">,</span><span class="w"> </span><span class="n">size</span><span class="p">,</span><span class="w"> </span><span class="n">align</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">new_ptr</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we just need to replace every use of <code>bump_allocator</code> with <code>hole_list_allocator</code> in our kernel:</p>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="c1"># in Cargo.toml</span>
+
+<span class="p">[</span><span class="n">dependencies</span><span class="p">.</span><span class="n">hole_list_allocator</span><span class="p">]</span>
+<span class="n">path</span> <span class="o">=</span> <span class="s">&quot;libs/hole_list_allocator&quot;</span>
+</code></pre></div>
+<div class="highlight"><pre><code class="language-diff" data-lang="diff"><span></span>in src/lib.rs:
+
+<span class="gd">-extern crate bump_allocator;</span>
+<span class="gi">+extern crate hole_list_allocator;</span>
+
+in memory::init in src/memory/mod.rs:
+
+<span class="gd">-use bump_allocator::{HEAP_START, HEAP_SIZE};</span>
+<span class="gi">+use linked_list_allocator::{HEAP_START, HEAP_SIZE};</span>
+</code></pre></div>
+
+<p>Our kernel uses the new allocator now, so we can deallocate memory without leaking it. The example from above should work now without causing an OOM situation:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in rust_main in src/lib.rs</span>
+
+<span class="k">for</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mi">0</span><span class="p">..</span><span class="mi">10000</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">format</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Some String&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<h3 id="performance">Performance</h3>
+
+<p>The linked list based approach has some performance problems. Each allocation or deallocation might need to scan the complete list of holes in the worst case. However, I think it&rsquo;s good enough for now, since our heap will stay relatively small for the near future. When our allocator becomes a performance problem eventually, we can just replace it with a faster alternative.</p>
+
+<h2 id="summary">Summary</h2>
+
+<p>Now we&rsquo;re able to use heap storage in our kernel without leaking memory. This allows us to effectively process dynamic data such as user supplied strings in the future. We can also use <code>Rc</code> and <code>Arc</code> to create types with shared ownership. And we have access to various data structures such as <code>Vec</code> or <code>Linked List</code>, which will make our lives much easier. We even have some well tested and optimized <a href="https://en.wikipedia.org/wiki/Binary_heap">binary heap</a> and <a href="https://en.wikipedia.org/wiki/B-tree">B-tree</a> implementations!</p>
+
+<h2 id="what-s-next">What&rsquo;s next?</h2>
+
+<p>This post concludes the section about memory management for now. We will revisit this topic eventually, but now it&rsquo;s time to explore other topics. The upcoming posts will be about CPU exceptions and interrupts. We will catch all page, double, and triple faults and create a driver to read keyboard input. But first, we need to improve our build setup. The next post will eliminate most of our Makefile using advanced Cargo features and prepare our kernel for interrupt handling.</p>
+<div class="footnotes">
+
+<hr />
+
+<ol>
+<li id="fn:1">The name <code>linked_list_allocator</code> is already taken, sorry :P.
+ <a class="footnote-return" href="#fnref:1"><sup>[return]</sup></a></li>
+</ol>
+</div>
+
+</article>
+
+<hr>
+<div class="PageNavigation">
+  
+    <a class="prev" href="/remap-the-kernel.html">&laquo; Remap the Kernel</a>
+  
+  
+</div>
+<hr>
+
+<div id="disqus_thread"></div>
+<script>
+  (function() {
+    
+    
+    if (window.location.hostname == "localhost")
+        return;
+
+    var d = document, s = d.createElement('script');
+
+    s.src = '//phil-opp.disqus.com/embed.js';
+
+    s.setAttribute('data-timestamp', +new Date());
+    (d.head || d.body).appendChild(s);
+  })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript" rel="nofollow">comments powered by Disqus.</a></noscript>
+
+</main>
+
+<footer class="footer">
+  <small>
+    &copy;
+    <time datetime="2016">2016</time>. All rights reserved.
+    <a href="/contact.html">Contact</a>
+  </small>
+</footer>
+</div>
+
+</body>
+</html>
+

@@ -1,0 +1,1117 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <meta http-equiv="X-Frame-Options" content="sameorigin">
+  
+  
+
+  <title>
+    Remap the Kernel &middot; Writing an OS in Rust
+  </title>
+
+  <link rel="canonical" href="http://os.phil-opp.com/remap-the-kernel.html">
+
+  
+  <link rel="stylesheet" href="/css/poole.css">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/syntax.css">
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/images/apple-touch-icon-precomposed.png">
+  <link rel="shortcut icon" href="/images/favicon.ico">
+
+  
+
+  <script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-65296949-1', 'auto');
+  ga('send', 'pageview');
+
+</script>
+
+</head>
+
+<body>
+<div class="container content">
+
+<header class="masthead">
+  <h3 class="masthead-title">
+    <a href="/" title="Home">Writing an OS in Rust</a>
+    <span class="navigation">
+      <small><a href="/atom.xml"><img src="/images/feed-icon.png" alt="RSS"></a></small>
+    </span>
+    <small>Philipp&nbsp;Oppermann's&nbsp;blog</small>
+  </h3>
+</header>
+
+<main>
+
+
+<article class="post">
+  <h1 class="post-title">Remap the Kernel</h1>
+  <time datetime="2016-01-01" class="post-date">
+    Jan 1, 2016
+    
+      (updated on Mar 6, 2016)
+    
+  </time>
+
+  
+
+<p>In this post we will create a new page table to map the kernel sections correctly. Therefor we will extend the paging module to support modifications of <em>inactive</em> page tables as well. Then we will switch to the new table and secure our kernel stack by creating a guard page.</p>
+
+<p>As always, you can find the source code on <a href="https://github.com/phil-opp/blog_os/tree/remap_the_kernel">Github</a>. Don&rsquo;t hesitate to file issues there if you have any problems or improvement suggestions. There is also a comment section at the end of this page. Note that this post requires a current Rust nightly.</p>
+
+<p><em>Updates</em>:</p>
+
+<ul>
+<li>The <code>AreaFrameAllocator</code> <a href="https://github.com/phil-opp/blog_os/issues/126">was broken</a> after switching to a new table. To fix this, we added the <a href="#fixing-the-frame-allocator">Fixing the Frame Allocator</a> section and updated the <a href="#page-align-sections">linker script</a>. For a complete set of changes see <a href="https://github.com/phil-opp/blog_os/pull/131">#131</a> and <a href="https://github.com/phil-opp/blog_os/compare/75aa669cdbb427c7bf0485c68692d243065cd3e9...635f7d3f9dced752f84d429e1d51f5c2b29854e3">this diff</a>.</li>
+<li>We <a href="https://github.com/phil-opp/blog_os/pull/141">fixed a bug</a> in iterating over a section&rsquo;s frames. Therefor we added a <code>Frame::range_inclusive</code> function and updated the <a href="#remapping-the-kernel">Remapping the Kernel section</a>. For a complete list of changes check out <a href="https://github.com/phil-opp/blog_os/commit/03ed3ce9a0758bf0d14a13144892c731216e25c6">this diff</a>.</li>
+</ul>
+
+<h2 id="motivation">Motivation</h2>
+
+<p>In the <a href="/modifying-page-tables.html">previous post</a>, we had a strange bug in the <code>unmap</code> function. Its reason was a silent stack overflow, which corrupted the page tables. Fortunately, our kernel stack is right above the page tables so that we noticed the overflow relatively quickly. This won&rsquo;t be the case when we add threads with new stacks in the future. Then a silent stack overflow could overwrite some data without us noticing. But eventually some completely unrelated function fails because a variable changed its value.</p>
+
+<p>As you can imagine, these kinds of bugs are horrendous to debug. For that reason we will create a new hierarchical page table in this post, which has <em>guard page</em> below the stack. A guard page is basically an unmapped page that causes a page fault when accessed. Thus we can catch stack overflows right when they happen.</p>
+
+<p>Also, we will use the <a href="/allocating-frames.html#kernel-elf-sections">information about kernel sections</a> to map the various sections individually instead of blindly mapping the first gigabyte. To improve safety even further, we will set the correct page table flags for the various sections. Thus it won&rsquo;t be possible to modify the contents of <code>.text</code> or to execute code from <code>.data</code> anymore.</p>
+
+<h2 id="preparation">Preparation</h2>
+
+<p>There are many things that can go wrong when we switch to a new table. Therefore it&rsquo;s a good idea to <a href="/set-up-gdb.html">set up a debugger</a>. You should not need it when you follow this post, but it&rsquo;s good to know how to debug a problem when it occurs<sup class="footnote-ref" id="fnref:fn-debug-notes"><a rel="footnote" href="#fn:fn-debug-notes">1</a></sup>.</p>
+
+<p>We also update the <code>Page</code> and <code>Frame</code> types to make our lives easier. The <code>Page</code> struct gets some derived traits:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/paging/mod.rs</span>
+
+<span class="cp">#[derive(Debug, Clone, Copy)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Page</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">number</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>By making it <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html">Copy</a>, we can still use it after passing it to functions such as <code>map_to</code>. We also make the <code>Page::containing_address</code> public (if it isn&rsquo;t already).</p>
+
+<p>The <code>Frame</code> type gets a <code>clone</code> method too, but it does not implement the <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone trait</a>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/mod.rs</span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Frame</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">clone</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Frame</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">Frame</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">number</span><span class="o">:</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The big difference is that this <code>clone</code> method is private. If we implemented the <a href="https://doc.rust-lang.org/nightly/core/clone/trait.Clone.html">Clone trait</a>, it would be public and usable from other modules. For example they could abuse it to free the same frame twice in the frame allocator.</p>
+
+<p>So why do we implement <code>Copy</code> for <code>Page</code> and make even its constructor public, but keep <code>Frame</code> as private as possible? The reason is that we can easily check the status of a <code>Page</code> by looking at the page tables. For example, the <code>map_to</code> function can easily check that the given page is unused.</p>
+
+<p>We can&rsquo;t do that for a <code>Frame</code>. If we wanted to be sure that a given frame is unused, we would need to look at all mapped <em>pages</em> and verify that none of them is mapped to the given frame. Since this is impractical, we need to rely on the fact that a passed <code>Frame</code> is always unused. For that reason it must not be possible to create a new <code>Frame</code> or to clone one from other modules. The only valid way to get a frame is to allocate it from a <code>FrameAllocator</code>.</p>
+
+<h2 id="recap-the-paging-module">Recap: The Paging Module</h2>
+
+<p>This post builds upon the post about <a href="/modifying-page-tables.html">page tables</a>, so let&rsquo;s start by quickly recapitulating what we&rsquo;ve done there.</p>
+
+<p>We created a <code>memory::paging</code> module, which reads and modifies the hierarchical page table through recursive mapping. The owner of the active P4 table and thus all subtables is an <code>ActivePageTable</code><sup class="footnote-ref" id="fnref:fn-apt-renamed"><a rel="footnote" href="#fn:fn-apt-renamed">2</a></sup> struct, which must be instantiated only once.</p>
+
+<p>The <code>ActivePageTable</code> struct provides the following interface:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="sd">/// Translates a virtual to the corresponding physical address.</span>
+<span class="sd">/// Returns `None` if the address is not mapped.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">translate</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">virtual_address</span><span class="o">:</span><span class="w"> </span><span class="n">VirtualAddress</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"></span>
+<span class="w">    </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">PhysicalAddress</span><span class="o">&gt;</span><span class="w"></span>
+<span class="p">{...}</span><span class="w"></span>
+
+<span class="sd">/// Maps the page to the frame with the provided flags.</span>
+<span class="sd">/// The `PRESENT` flag is added by default. Needs a</span>
+<span class="sd">/// `FrameAllocator` as it might need to create new page tables.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">map_to</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"></span>
+<span class="w">                 </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"></span>
+<span class="w">                 </span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"></span>
+<span class="w">                 </span><span class="n">flags</span><span class="o">:</span><span class="w"> </span><span class="n">EntryFlags</span><span class="p">,</span><span class="w"></span>
+<span class="w">                 </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{...}</span><span class="w"></span>
+
+<span class="sd">/// Maps the page to some free frame with the provided flags.</span>
+<span class="sd">/// The free frame is allocated from the given `FrameAllocator`.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">map</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="o">:</span><span class="w"> </span><span class="n">EntryFlags</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{...}</span><span class="w"></span>
+
+<span class="sd">/// Identity map the the given frame with the provided flags.</span>
+<span class="sd">/// The `FrameAllocator` is used to create new page tables if needed.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">identity_map</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"></span>
+<span class="w">                       </span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"></span>
+<span class="w">                       </span><span class="n">flags</span><span class="o">:</span><span class="w"> </span><span class="n">EntryFlags</span><span class="p">,</span><span class="w"></span>
+<span class="w">                       </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{...}</span><span class="w"></span>
+
+
+<span class="sd">/// Unmaps the given page and adds all freed frames to the given</span>
+<span class="sd">/// `FrameAllocator`.</span>
+<span class="k">fn</span><span class="w"> </span><span class="n">unmap</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{...}</span><span class="w"></span>
+</code></pre></div>
+
+<h2 id="overview">Overview</h2>
+
+<p>Our goal is to use the <code>ActivePageTable</code> functions to map the kernel sections correctly in a new page table. In pseudo code:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">fn</span><span class="w"> </span><span class="n">remap_the_kernel</span><span class="p">(</span><span class="n">boot_info</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BootInformation</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">new_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">create_new_table</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">section</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">boot_info</span><span class="p">.</span><span class="n">elf_sections</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">section</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">new_table</span><span class="p">.</span><span class="n">identity_map</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">section</span><span class="p">.</span><span class="n">flags</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">new_table</span><span class="p">.</span><span class="n">activate</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">create_guard_page_for_stack</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>But the <code>ActivePageTable</code> methods – as the name suggests – only work for the <em>active table</em>. So we would need to activate <code>new_table</code> <em>before</em> we use <code>identity_map</code>. But this is not possible since it would cause an immediate page fault when the CPU tries to read the next instruction.</p>
+
+<p>So we need a way to use the <code>ActivePageTable</code> methods on <em>inactive</em> page tables as well.</p>
+
+<h2 id="inactive-tables">Inactive Tables</h2>
+
+<p>Let&rsquo;s start by creating a type for inactive page tables. Like an <code>ActivePageTable</code>, an <code>InactivePageTable</code> owns a P4 table. The difference is that the inactive P4 table is not used by the CPU.</p>
+
+<p>We create the struct in <code>memory/paging/mod.rs</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">p4_frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">(</span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// TODO zero and recursive map the frame</span>
+<span class="w">        </span><span class="n">InactivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">p4_frame</span><span class="o">:</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Without zeroing, the P4 table contains complete garbage and maps random memory. But we can&rsquo;t zero it right now because the <code>p4_frame</code> is not mapped to a virtual address.</p>
+
+<p>Well, maybe it&rsquo;s still part of the identity mapped first gigabyte. Then we could zero it without problems since the physical address would be a valid virtual address, too. But this “solution” is hacky and won&rsquo;t work after this post anymore (since we will remove all needless identity mapping).</p>
+
+<p>Instead, we will try to temporary map the frame to some virtual address.</p>
+
+<h3 id="temporary-mapping">Temporary Mapping</h3>
+
+<p>Therefor we add a <code>TemporaryPage</code> struct. We create it in a new <code>temporary_page</code> submodule to keep the paging module clean. It looks like this:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// src/memory/paging/mod.rs</span>
+<span class="kn">mod</span><span class="w"> </span><span class="n">temporary_page</span><span class="p">;</span><span class="w"></span>
+
+<span class="c1">// src/memory/paging/temporary_page.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">super</span><span class="o">::</span><span class="n">Page</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">TemporaryPage</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We add methods to temporary map and unmap the page:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">super</span><span class="o">::</span><span class="p">{</span><span class="n">ActivePageTable</span><span class="p">,</span><span class="w"> </span><span class="n">VirtualAddress</span><span class="p">};</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="n">Frame</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">TemporaryPage</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="sd">/// Maps the temporary page to the given frame in the active table.</span>
+<span class="w">    </span><span class="sd">/// Returns the start address of the temporary page.</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">map</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"> </span><span class="n">active_table</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">VirtualAddress</span><span class="w"></span>
+<span class="w">    </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kn">use</span><span class="w"> </span><span class="n">super</span><span class="o">::</span><span class="n">entry</span><span class="o">::</span><span class="n">WRITABLE</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">        </span><span class="n">assert</span><span class="o">!</span><span class="p">(</span><span class="n">active_table</span><span class="p">.</span><span class="n">translate_page</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">page</span><span class="p">).</span><span class="n">is_none</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                </span><span class="s">&quot;temporary page is already mapped&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">active_table</span><span class="p">.</span><span class="n">map_to</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">page</span><span class="p">,</span><span class="w"> </span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">WRITABLE</span><span class="p">,</span><span class="w"> </span><span class="o">???</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">page</span><span class="p">.</span><span class="n">start_address</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="sd">/// Unmaps the temporary page in the active table.</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">unmap</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">active_table</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">active_table</span><span class="p">.</span><span class="n">unmap</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">page</span><span class="p">,</span><span class="w"> </span><span class="o">???</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>???</code> needs to be some <code>FrameAllocator</code>. We could just add an additional <code>allocator</code> argument but there is a better solution.</p>
+
+<p>It takes advantage of the fact that we always map the same page. So the allocator only needs to hold 3 frames: one P3, one P2, and one P1 table (the P4 table is always mapped). This allows us to create a tiny allocator and add it as field to the <code>TemporaryPage</code> struct itself:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">TemporaryPage</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="n">TinyAllocator</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">TemporaryPage</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// as above, but with `&amp;mut self.allocator` instead of `???`</span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">struct</span><span class="w"> </span><span class="n">TinyAllocator</span><span class="p">([</span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Frame</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="mi">3</span><span class="p">]);</span><span class="w"></span>
+</code></pre></div>
+
+<p>Our tiny allocator just consists of 3 slots to store frames. It will be empty when the temporary page is mapped and full when all corresponding page tables are unmapped.</p>
+
+<p>To turn <code>TinyAllocator</code> into a frame allocator, we need to add the trait implementation:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="n">FrameAllocator</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">TinyAllocator</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">allocate_frame</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Frame</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">frame_option</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="n">frame_option</span><span class="p">.</span><span class="n">is_some</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="k">return</span><span class="w"> </span><span class="n">frame_option</span><span class="p">.</span><span class="n">take</span><span class="p">();</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="nb">None</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">deallocate_frame</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">frame_option</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="n">frame_option</span><span class="p">.</span><span class="n">is_none</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="o">*</span><span class="n">frame_option</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">frame</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="k">return</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="n">panic</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Tiny allocator can hold only 3 frames.&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>On allocation, we use the <a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.take">Option::take</a> function to take an available frame from the first filled slot and on deallocation, we put the frame back into the first free slot.</p>
+
+<p>To finish the <code>TinyAllocator</code>, we add a constructor that fills it from some other allocator:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">impl</span><span class="w"> </span><span class="n">TinyAllocator</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">TinyAllocator</span><span class="w"></span>
+<span class="w">        </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="w">    </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">f</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">allocator</span><span class="p">.</span><span class="n">allocate_frame</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">frames</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">f</span><span class="p">(),</span><span class="w"> </span><span class="n">f</span><span class="p">(),</span><span class="w"> </span><span class="n">f</span><span class="p">()];</span><span class="w"></span>
+<span class="w">        </span><span class="n">TinyAllocator</span><span class="p">(</span><span class="n">frames</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We use a little closure here that saves us some typing.</p>
+
+<p>Now our <code>TemporaryPage</code> type is nearly complete. We only add one more method for convenience:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">super</span><span class="o">::</span><span class="n">table</span><span class="o">::</span><span class="p">{</span><span class="n">Table</span><span class="p">,</span><span class="w"> </span><span class="n">Level1</span><span class="p">};</span><span class="w"></span>
+
+<span class="sd">/// Maps the temporary page to the given page table frame in the active</span>
+<span class="sd">/// table. Returns a reference to the now mapped table.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">map_table_frame</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"></span>
+<span class="w">                       </span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"></span>
+<span class="w">                       </span><span class="n">active_table</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="p">)</span><span class="w"></span>
+<span class="w">                       </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">Level1</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">map</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">active_table</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">Level1</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>This function interprets the given frame as a page table frame and returns a <code>Table</code> reference. We return a table of level 1 because it <a href="/modifying-page-tables.html#some-clever-solution">forbids calling the <code>next_table</code> methods</a>. Calling <code>next_table</code> must not be possible since it&rsquo;s not a page of the recursive mapping. To be able to return a <code>Table&lt;Level1&gt;</code>, we need to make the <code>Level1</code> enum in <code>memory/paging/table.rs</code> public.</p>
+
+<p>The <code>unsafe</code> block is safe since the <code>VirtualAddress</code> returned by the <code>map</code> function is always valid and the type cast just reinterprets the frame&rsquo;s content.</p>
+
+<p>To complete the <code>temporary_page</code> module, we add a <code>TemporaryPage::new</code> constructor:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">TemporaryPage</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">TemporaryPage</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">page</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="n">TinyAllocator</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">allocator</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<h3 id="zeroing-the-inactivepagetable">Zeroing the InactivePageTable</h3>
+
+<p>Now we can use <code>TemporaryPage</code> to fix our <code>InactivePageTable::new</code> function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/paging/mod.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">temporary_page</span><span class="o">::</span><span class="n">TemporaryPage</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">(</span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"></span>
+<span class="w">               </span><span class="n">active_table</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="p">,</span><span class="w"></span>
+<span class="w">               </span><span class="n">temporary_page</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">TemporaryPage</span><span class="p">)</span><span class="w"></span>
+<span class="w">               </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">temporary_page</span><span class="p">.</span><span class="n">map_table_frame</span><span class="p">(</span><span class="n">frame</span><span class="p">.</span><span class="n">clone</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                </span><span class="n">active_table</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="c1">// now we are able to zero the table</span>
+<span class="w">            </span><span class="n">table</span><span class="p">.</span><span class="n">zero</span><span class="p">();</span><span class="w"></span>
+<span class="w">            </span><span class="c1">// set up recursive mapping for the table</span>
+<span class="w">            </span><span class="n">table</span><span class="p">[</span><span class="mi">511</span><span class="p">].</span><span class="n">set</span><span class="p">(</span><span class="n">frame</span><span class="p">.</span><span class="n">clone</span><span class="p">(),</span><span class="w"> </span><span class="n">PRESENT</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">WRITABLE</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="n">temporary_page</span><span class="p">.</span><span class="n">unmap</span><span class="p">(</span><span class="n">active_table</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">        </span><span class="n">InactivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">p4_frame</span><span class="o">:</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We added two new arguments, <code>active_table</code> and <code>temporary_page</code>. We need an <a href="http://rustbyexample.com/variable_bindings/scope.html">inner scope</a> to ensure that the <code>table</code> variable is dropped before we try to unmap the temporary page again. This is required since the <code>table</code> variable exclusively borrows <code>temporary_page</code> as long as it&rsquo;s alive.</p>
+
+<p>Now we are able to create valid inactive page tables, which are zeroed and recursively mapped. But we still can&rsquo;t modify them. To resolve this problem, we need to look at recursive mapping again.</p>
+
+<h2 id="revisiting-recursive-mapping">Revisiting Recursive Mapping</h2>
+
+<p>Recursive mapping works by mapping the last P4 entry to the P4 table itself. Thus we can access the page tables by looping one or more times.</p>
+
+<p>For example, accessing a P3 table requires lopping three times:</p>
+
+<p><img src="/images/recursive_mapping_access_p3.svg" alt="access active P3 table through recursive mapping" /></p>
+
+<p>We can use the same mechanism to access inactive tables. The trick is to change the recursive mapping of the active P4 table to point to the inactive P4 table:</p>
+
+<p><img src="/images/recursive_mapping_access_p3_inactive_table.svg" alt="access inactive P3 table through recursive mapping" /></p>
+
+<p>Now the inactive table can be accessed exactly as the active table, even the magic addresses are the same. This allows us to use the <code>ActivePageTable</code> interface and the existing mapping methods for inactive tables, too. Note that everything besides the recursive mapping continues to work exactly as before since we&rsquo;ve never changed the active table in the CPU.</p>
+
+<h3 id="implementation-draft">Implementation Draft</h3>
+
+<p>We add a method to <code>ActivePageTable</code> that temporary changes the recursive mapping and executes a given closure in the new context:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">with</span><span class="o">&lt;</span><span class="n">F</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"></span>
+<span class="w">               </span><span class="n">table</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="p">,</span><span class="w"></span>
+<span class="w">               </span><span class="n">f</span><span class="o">:</span><span class="w"> </span><span class="n">F</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">F</span><span class="o">:</span><span class="w"> </span><span class="nb">FnOnce</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="p">)</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">x86</span><span class="o">::</span><span class="n">tlb</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">flush_tlb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">tlb</span><span class="o">::</span><span class="n">flush_all</span><span class="p">()</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// overwrite recursive mapping</span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">p4_mut</span><span class="p">()[</span><span class="mi">511</span><span class="p">].</span><span class="n">set</span><span class="p">(</span><span class="n">table</span><span class="p">.</span><span class="n">p4_frame</span><span class="p">.</span><span class="n">clone</span><span class="p">(),</span><span class="w"> </span><span class="n">PRESENT</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">WRITABLE</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">flush_tlb</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// execute f in the new context</span>
+<span class="w">    </span><span class="n">f</span><span class="p">(</span><span class="bp">self</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// TODO restore recursive mapping to original p4 table</span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>It overwrites the 511th P4 entry and points it to the inactive table frame. Then it flushes the <a href="http://wiki.osdev.org/TLB">translation lookaside buffer (TLB)</a>, which still contains some old translations. We need to flush all pages that are part of the recursive mapping, so the easiest way is to flush the TLB completely.</p>
+
+<p>Now that the recursive mapping points to the given inactive table, we execute the closure in the new context. The closure can call all active table methods such as <code>translate</code> or <code>map_to</code>. It could even call <code>with</code> again and chain another inactive table! Wait… that would not work:</p>
+
+<p><img src="/images/recursive_mapping_access_p1_invalid_chaining.svg" alt="access inactive P3 table through recursive mapping" /></p>
+
+<p>Here the closure called <code>with</code> again and thus changed the recursive mapping of the inactive table to point to a second inactive table. Now we want to modify the P1 of the <em>second</em> inactive table, but instead we land on the P1 of the <em>first</em> inactive table since we never follow the pointer to the second table. Only when modifying the P2, P3, or P4 table we really access the second inactive table. This inconsistency would break our mapping functions completely.</p>
+
+<p>So we should really prohibit the closure from calling <code>with</code> again. We could add some runtime assertion that panics when the active table is not recursive mapped anymore. But a cleaner solution is to split off the mapping code from <code>ActivePageTable</code> into a new <code>Mapper</code> type.</p>
+
+<h3 id="refactoring">Refactoring</h3>
+
+<p>We start by creating a new <code>memory/paging/mapper.rs</code> submodule and moving the <code>ActivePageTable</code> struct and its <code>impl</code> block to it. Then we rename it to <code>Mapper</code> and make all methods public (so we can still use them from the paging module). The <code>with</code> method is removed.</p>
+
+<p>After adjusting the imports, the module should look like this:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in memory/paging/mod.rs</span>
+<span class="kn">mod</span><span class="w"> </span><span class="n">mapper</span><span class="p">;</span><span class="w"></span>
+
+<span class="c1">// memory/paging/mapper.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">super</span><span class="o">::</span><span class="p">{</span><span class="n">VirtualAddress</span><span class="p">,</span><span class="w"> </span><span class="n">PhysicalAddress</span><span class="p">,</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"> </span><span class="n">ENTRY_COUNT</span><span class="p">};</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">super</span><span class="o">::</span><span class="n">entry</span><span class="o">::*</span><span class="p">;</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">super</span><span class="o">::</span><span class="n">table</span><span class="o">::</span><span class="p">{</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">Table</span><span class="p">,</span><span class="w"> </span><span class="n">Level4</span><span class="p">,</span><span class="w"> </span><span class="n">Level1</span><span class="p">};</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="p">{</span><span class="n">PAGE_SIZE</span><span class="p">,</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="p">};</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">ptr</span><span class="o">::</span><span class="n">Unique</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Mapper</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">p4</span><span class="o">:</span><span class="w"> </span><span class="n">Unique</span><span class="o">&lt;</span><span class="n">Table</span><span class="o">&lt;</span><span class="n">Level4</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Mapper</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Mapper</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">p4</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Table</span><span class="o">&lt;</span><span class="n">Level4</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// the remaining mapping methods, all public</span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we create a new <code>ActivePageTable</code> struct in <code>memory/paging/mod.rs</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">mapper</span><span class="o">::</span><span class="n">Mapper</span><span class="p">;</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">ops</span><span class="o">::</span><span class="p">{</span><span class="n">Deref</span><span class="p">,</span><span class="w"> </span><span class="n">DerefMut</span><span class="p">};</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">mapper</span><span class="o">:</span><span class="w"> </span><span class="n">Mapper</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Deref</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span><span class="w"> </span><span class="n">Target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Mapper</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">deref</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Mapper</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">&amp;</span><span class="bp">self</span><span class="p">.</span><span class="n">mapper</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">DerefMut</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">deref_mut</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Mapper</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">mapper</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">mapper</span><span class="o">:</span><span class="w"> </span><span class="n">Mapper</span><span class="o">::</span><span class="n">new</span><span class="p">(),</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">with</span><span class="o">&lt;</span><span class="n">F</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"></span>
+<span class="w">                   </span><span class="n">table</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="p">,</span><span class="w"></span>
+<span class="w">                   </span><span class="n">f</span><span class="o">:</span><span class="w"> </span><span class="n">F</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="n">where</span><span class="w"> </span><span class="n">F</span><span class="o">:</span><span class="w"> </span><span class="nb">FnOnce</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Mapper</span><span class="p">)</span><span class="w"> </span><span class="c1">// `Mapper` instead of `ActivePageTable`</span>
+<span class="w">    </span><span class="p">{...}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <a href="https://doc.rust-lang.org/nightly/core/ops/trait.Deref.html">Deref</a> and <a href="https://doc.rust-lang.org/nightly/core/ops/trait.DerefMut.html">DerefMut</a> implementations allow us to use the <code>ActivePageTable</code> exactly as before, for example we still can call <code>map_to</code> on it (because of <a href="https://doc.rust-lang.org/nightly/book/deref-coercions.html">deref coercions</a>). But the closure called in the <code>with</code> function can no longer invoke <code>with</code> again. The reason is that we changed the type of the generic <code>F</code> parameter a bit: Instead of an <code>ActivePageTable</code>, the closure just gets a <code>Mapper</code> as argument.</p>
+
+<h3 id="restoring-the-recursive-mapping">Restoring the Recursive Mapping</h3>
+
+<p>Right now, the <code>with</code> function overwrites the recursive mapping and calls the closure. But it does not restore the previous recursive mapping yet. So let&rsquo;s fix that!</p>
+
+<p>To backup the physical P4 frame of the active table, we can either read it from the 511th P4 entry (before we change it) or from the CR3 control register directly. We will do the latter as it should be faster and we already have a external crate that makes it easy:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">x86</span><span class="o">::</span><span class="n">controlregs</span><span class="p">;</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">backup</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">controlregs</span><span class="o">::</span><span class="n">cr3</span><span class="p">()</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="w"></span>
+<span class="p">);</span><span class="w"></span>
+</code></pre></div>
+
+<p>Why is it unsafe? Because reading the CR3 register leads to a CPU exception if the processor is not running in kernel mode (<a href="http://wiki.osdev.org/Security#Low-level_Protection_Mechanisms">Ring 0</a>). But this code will always run in kernel mode, so the <code>unsafe</code> block is completely safe here.</p>
+
+<p>Now that we have a backup of the original P4 frame, we need a way to restore it after the closure has run. So we need to somehow modify the 511th entry of the original P4 frame, which is still the active table in the CPU. But we can&rsquo;t access it because the recursive mapping now points to the inactive table:</p>
+
+<p><img src="/images/recursive_mapping_inactive_table_scheme.svg" alt="it's not possible to access the original P4 through recursive mapping anymore" /></p>
+
+<p>It&rsquo;s just not possible to access the active P4 entry in 4 steps, so we can&rsquo;t reach it through the 4-level page table.</p>
+
+<p>We could try to overwrite the recursive mapping of the <em>inactive</em> P4 table and point it back to the original P4 frame:</p>
+
+<p><img src="/images/cyclic_mapping_inactive_tables.svg" alt="cyclic map active and inactive P4 tables" /></p>
+
+<p>Now we can reach the active P4 entry in 4 steps and could restore the original mapping in the active table. But this hack has a drawback: The inactive table is now invalid since it is no longer recursive mapped. We would need to fix it by using a temporary page again (as above).</p>
+
+<p>But if we need a temporary page anyway, we can just use it to map the original P4 frame directly. Thus we avoid the above hack and make the code simpler. So let&rsquo;s do it that way.</p>
+
+<h3 id="completing-the-implementation">Completing the Implementation</h3>
+
+<p>The <code>with</code> method gets an additional <code>TemporaryPage</code> argument, which we use to backup and restore the original recursive mapping:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">with</span><span class="o">&lt;</span><span class="n">F</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"></span>
+<span class="w">                   </span><span class="n">table</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="p">,</span><span class="w"></span>
+<span class="w">                   </span><span class="n">temporary_page</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">temporary_page</span><span class="o">::</span><span class="n">TemporaryPage</span><span class="p">,</span><span class="w"> </span><span class="c1">// new</span>
+<span class="w">                   </span><span class="n">f</span><span class="o">:</span><span class="w"> </span><span class="n">F</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">F</span><span class="o">:</span><span class="w"> </span><span class="nb">FnOnce</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Mapper</span><span class="p">)</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">x86</span><span class="o">::</span><span class="p">{</span><span class="n">controlregs</span><span class="p">,</span><span class="w"> </span><span class="n">tlb</span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">flush_tlb</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">tlb</span><span class="o">::</span><span class="n">flush_all</span><span class="p">()</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">backup</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="w"></span>
+<span class="w">            </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">controlregs</span><span class="o">::</span><span class="n">cr3</span><span class="p">()</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">        </span><span class="c1">// map temporary_page to current p4 table</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">p4_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">temporary_page</span><span class="p">.</span><span class="n">map_table_frame</span><span class="p">(</span><span class="n">backup</span><span class="p">.</span><span class="n">clone</span><span class="p">(),</span><span class="w"> </span><span class="bp">self</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">        </span><span class="c1">// overwrite recursive mapping</span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">p4_mut</span><span class="p">()[</span><span class="mi">511</span><span class="p">].</span><span class="n">set</span><span class="p">(</span><span class="n">table</span><span class="p">.</span><span class="n">p4_frame</span><span class="p">.</span><span class="n">clone</span><span class="p">(),</span><span class="w"> </span><span class="n">PRESENT</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">WRITABLE</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">flush_tlb</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">        </span><span class="c1">// execute f in the new context</span>
+<span class="w">        </span><span class="n">f</span><span class="p">(</span><span class="bp">self</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">        </span><span class="c1">// restore recursive mapping to original p4 table</span>
+<span class="w">        </span><span class="n">p4_table</span><span class="p">[</span><span class="mi">511</span><span class="p">].</span><span class="n">set</span><span class="p">(</span><span class="n">backup</span><span class="p">,</span><span class="w"> </span><span class="n">PRESENT</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">WRITABLE</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">flush_tlb</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">temporary_page</span><span class="p">.</span><span class="n">unmap</span><span class="p">(</span><span class="bp">self</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Again, the inner scope is needed to end the borrow of <code>temporary_page</code> so that we can unmap it again. Note that we need to flush the TLB another time after we restored the original recursive mapping.</p>
+
+<p>Now the <code>with</code> function is ready to be used!</p>
+
+<h2 id="remapping-the-kernel">Remapping the Kernel</h2>
+
+<p>Let&rsquo;s tackle the main task of this post: remapping the kernel sections. Therefor we create a <code>remap_the_kernel</code> function in <code>memory/paging/mod.rs</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">multiboot2</span><span class="o">::</span><span class="n">BootInformation</span><span class="p">;</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="p">{</span><span class="n">PAGE_SIZE</span><span class="p">,</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="p">};</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">remap_the_kernel</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">,</span><span class="w"> </span><span class="n">boot_info</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BootInformation</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">temporary_page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TemporaryPage</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">Page</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">number</span><span class="o">:</span><span class="w"> </span><span class="mh">0xcafebabe</span><span class="w"> </span><span class="p">},</span><span class="w"></span>
+<span class="w">        </span><span class="n">allocator</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">active_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="o">::</span><span class="n">new</span><span class="p">()</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">new_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">allocator</span><span class="p">.</span><span class="n">allocate_frame</span><span class="p">().</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;no more frames&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">InactivePageTable</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">active_table</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">temporary_page</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">active_table</span><span class="p">.</span><span class="n">with</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">new_table</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">temporary_page</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">mapper</span><span class="o">|</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">boot_info</span><span class="p">.</span><span class="n">elf_sections_tag</span><span class="p">()</span><span class="w"></span>
+<span class="w">            </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;Memory map tag required&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">section</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="p">.</span><span class="n">sections</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="c1">// TODO mapper.identity_map() all pages of `section`</span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">});</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>First, we create a temporary page at page number <code>0xcafebabe</code>. We could use <code>0xdeadbeaf</code> or <code>0x123456789</code> as well, as long as the page is unused. The <code>active_table</code> and the <code>new_table</code> are created using their constructor functions.</p>
+
+<p>Then we use the <code>with</code> function to temporary change the recursive mapping and execute the closure as if the <code>new_table</code> were active. This allows us to map the sections in the new table without changing the active mapping. To get the kernel sections, we use the <a href="/allocating-frames.html#the-multiboot-information-structure">Multiboot information structure</a>.</p>
+
+<p>Let&rsquo;s resolve the above <code>TODO</code> by identity mapping the sections:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">for</span><span class="w"> </span><span class="n">section</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="p">.</span><span class="n">sections</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">entry</span><span class="o">::</span><span class="n">WRITABLE</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">section</span><span class="p">.</span><span class="n">is_allocated</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// section is not loaded to memory</span>
+<span class="w">        </span><span class="k">continue</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">assert</span><span class="o">!</span><span class="p">(</span><span class="n">address</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">PAGE_SIZE</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="s">&quot;sections need to be page aligned&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;mapping section at addr: {:#x}, size: {:#x}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">section</span><span class="p">.</span><span class="n">addr</span><span class="p">,</span><span class="w"> </span><span class="n">section</span><span class="p">.</span><span class="n">size</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">WRITABLE</span><span class="p">;</span><span class="w"> </span><span class="c1">// TODO use real section flags</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">start_frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">section</span><span class="p">.</span><span class="n">start_address</span><span class="p">());</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">end_frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">section</span><span class="p">.</span><span class="n">end_address</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">range_inclusive</span><span class="p">(</span><span class="n">start_frame</span><span class="p">,</span><span class="w"> </span><span class="n">end_frame</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="n">mapper</span><span class="p">.</span><span class="n">identity_map</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We skip all sections that were not loaded into memory (e.g. debug sections). We require that all sections are page aligned because a page must not contain sections with different flags. For example, we would need to set the <code>EXECUTABLE</code> and <code>WRITABLE</code> flags for a page that contains parts of the <code>.code</code> and <code>.data</code> section. Thus we could modify the running code or execute bytes from the <code>.data</code> section as code.</p>
+
+<p>To map a section, we iterate over all of its frames of a section by using a new <code>Frame::range_inclusive</code> function (shown below). Note that the end address is exclusive, so that it&rsquo;s not part of the section anymore (it&rsquo;s the first byte of the next section). Thus we need to subtract 1 to get the <code>end_frame</code>.</p>
+
+<p>The <code>Frame::range_inclusive</code> function looks like this:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/mod.rs</span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Frame</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">range_inclusive</span><span class="p">(</span><span class="n">start</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"> </span><span class="n">end</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">FrameIter</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">FrameIter</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">start</span><span class="o">:</span><span class="w"> </span><span class="n">start</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">end</span><span class="o">:</span><span class="w"> </span><span class="n">end</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">struct</span><span class="w"> </span><span class="n">FrameIter</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">start</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">end</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="nb">Iterator</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">FrameIter</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span><span class="w"> </span><span class="n">Item</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Frame</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">next</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Frame</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">start</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">end</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">start</span><span class="p">.</span><span class="n">clone</span><span class="p">();</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">start</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="nb">Some</span><span class="p">(</span><span class="n">frame</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nb">None</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w"> </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Instead of creating a custom iterator, we could have used the <a href="https://doc.rust-lang.org/nightly/core/ops/struct.Range.html">Range</a> struct of the standard library. But it requires that we implement the <a href="https://doc.rust-lang.org/nightly/core/num/trait.One.html">One</a> and <a href="https://doc.rust-lang.org/nightly/core/ops/trait.Add.html">Add</a> traits for <code>Frame</code>. Then every module could perform arithmetic operations on frames, for example <code>let frame3 = frame1 + frame2</code>. This would violate our safety invariants because <code>frame3</code> could be already in use. The <code>range_inclusive</code> function does not have these problems because it is only available inside the <code>memory</code> module.</p>
+
+<h3 id="page-align-sections">Page Align Sections</h3>
+
+<p>Right now our sections aren&rsquo;t page aligned, so the assertion in <code>remap_the_kernel</code> would fail. We can fix this by making the section size a multiple of the page size. To do this, we add an <code>ALIGN</code> statement to all sections in the linker file. For example:</p>
+<div class="highlight"><pre><span></span>SECTIONS {
+  . = 1M;
+
+  .text :
+  {
+    *(.text .text.*)
+    . = ALIGN(4K);
+  }
+}
+</pre></div>
+
+<p>The <code>.</code> is the “current location counter” and represents the current virtual address. At the beginning of the <code>SECTIONS</code> tag we set it to <code>1M</code>, so our kernel starts at 1MiB. We use the <a href="http://www.math.utah.edu/docs/info/ld_3.html#SEC12">ALIGN</a> function to align the current location counter to the next <code>4K</code> boundary (<code>4K</code> is the page size). Thus the end of the <code>.text</code> section – and the beginning of the next section – are page aligned.</p>
+
+<p>To put all sections on their own page, we add the <code>ALIGN</code> statement to all of them:</p>
+<div class="highlight"><pre><span></span><span class="cm">/* src/arch/x86_64/linker.ld */</span><span class="w"></span>
+
+SECTIONS<span class="w"> </span><span class="err">{</span><span class="w"></span>
+<span class="w">  </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="m">1</span>M<span class="err">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="o">.</span><span class="nl">rodata</span><span class="w"> </span><span class="o">:</span><span class="w"></span>
+<span class="w">  </span><span class="err">{</span><span class="w"></span>
+<span class="w">    </span><span class="cm">/* ensure that the multiboot header is at the beginning */</span><span class="w"></span>
+<span class="w">    </span>KEEP<span class="o">(*(.</span>multiboot_header<span class="o">))</span><span class="w"></span>
+<span class="w">    </span><span class="o">*(.</span>rodata<span class="w"> </span><span class="o">.</span>rodata<span class="o">.*)</span><span class="w"></span>
+<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
+<span class="w">  </span><span class="err">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="o">.</span><span class="nl">text</span><span class="w"> </span><span class="o">:</span><span class="w"></span>
+<span class="w">  </span><span class="err">{</span><span class="w"></span>
+<span class="w">    </span><span class="o">*(.</span>text<span class="w"> </span><span class="o">.</span>text<span class="o">.*)</span><span class="w"></span>
+<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
+<span class="w">  </span><span class="err">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="o">.</span><span class="nl">data</span><span class="w"> </span><span class="o">:</span><span class="w"></span>
+<span class="w">  </span><span class="err">{</span><span class="w"></span>
+<span class="w">    </span><span class="o">*(.</span>data<span class="w"> </span><span class="o">.</span>data<span class="o">.*)</span><span class="w"></span>
+<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
+<span class="w">  </span><span class="err">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="o">.</span><span class="nl">bss</span><span class="w"> </span><span class="o">:</span><span class="w"></span>
+<span class="w">  </span><span class="err">{</span><span class="w"></span>
+<span class="w">    </span><span class="o">*(.</span>bss<span class="w"> </span><span class="o">.</span>bss<span class="o">.*)</span><span class="w"></span>
+<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
+<span class="w">  </span><span class="err">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="o">.</span>data<span class="o">.</span>rel<span class="o">.</span><span class="nl">ro</span><span class="w"> </span><span class="o">:</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="w"> </span><span class="err">{</span><span class="w"></span>
+<span class="w">    </span><span class="o">*(.</span>data<span class="o">.</span>rel<span class="o">.</span>ro<span class="o">.</span>local<span class="o">*)</span><span class="w"> </span><span class="o">*(.</span>data<span class="o">.</span>rel<span class="o">.</span>ro<span class="w"> </span><span class="o">.</span>data<span class="o">.</span>rel<span class="o">.</span>ro<span class="o">.*)</span><span class="w"></span>
+<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
+<span class="w">  </span><span class="err">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="o">.</span><span class="nl">gcc_except_table</span><span class="w"> </span><span class="o">:</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="w"> </span><span class="err">{</span><span class="w"></span>
+<span class="w">    </span><span class="o">*(.</span>gcc_except_table<span class="o">)</span><span class="w"></span>
+<span class="w">    </span><span class="o">.</span><span class="w"> </span><span class="o">=</span><span class="w"> </span>ALIGN<span class="o">(</span><span class="m">4</span>K<span class="o">)</span><span class="err">;</span><span class="w"></span>
+<span class="w">  </span><span class="err">}</span><span class="w"></span>
+<span class="err">}</span><span class="w"></span>
+</pre></div>
+
+<p>Instead of page aligning the <code>.multiboot_header</code> section, we merge it into the <code>.rodata</code> section. That way, we don&rsquo;t waste a whole page for the few bytes of the Multiboot header. We could merge it into any section, but <code>.rodata</code> fits best because it has the same flags (neither writable nor executable). The Multiboot header still needs to be at the beginning of the file, so <code>.rodata</code> must be our first section now.</p>
+
+<h3 id="testing-it">Testing it</h3>
+
+<p>Time to test it! We reexport the <code>remap_the_kernel</code> function from the memory module and call it from <code>rust_main</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/mod.rs</span>
+<span class="k">pub</span><span class="w"> </span><span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">remap_the_kernel</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(</span><span class="n">multiboot_information_address</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// ATTENTION: we have a very small stack and no guard page</span>
+
+<span class="w">    </span><span class="c1">// the same as before</span>
+<span class="w">    </span><span class="n">vga_buffer</span><span class="o">::</span><span class="n">clear_screen</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Hello World{}&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;!&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">boot_info</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">multiboot2</span><span class="o">::</span><span class="n">load</span><span class="p">(</span><span class="n">multiboot_information_address</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">memory_map_tag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">boot_info</span><span class="p">.</span><span class="n">memory_map_tag</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;Memory map tag required&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">boot_info</span><span class="p">.</span><span class="n">elf_sections_tag</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;Elf sections tag required&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">kernel_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="p">.</span><span class="n">sections</span><span class="p">().</span><span class="n">map</span><span class="p">(</span><span class="o">|</span><span class="n">s</span><span class="o">|</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">min</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">kernel_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="p">.</span><span class="n">sections</span><span class="p">().</span><span class="n">map</span><span class="p">(</span><span class="o">|</span><span class="n">s</span><span class="o">|</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">addr</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">size</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">max</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">multiboot_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">multiboot_information_address</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">multiboot_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">multiboot_start</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="p">(</span><span class="n">boot_info</span><span class="p">.</span><span class="n">total_size</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;kernel start: 0x{:x}, kernel end: 0x{:x}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">kernel_start</span><span class="p">,</span><span class="w"> </span><span class="n">kernel_end</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;multiboot start: 0x{:x}, multiboot end: 0x{:x}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">multiboot_start</span><span class="p">,</span><span class="w"> </span><span class="n">multiboot_end</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">frame_allocator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="n">AreaFrameAllocator</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="w"></span>
+<span class="w">        </span><span class="n">kernel_start</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">kernel_end</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">multiboot_start</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">multiboot_end</span><span class="p">,</span><span class="w"> </span><span class="n">memory_map_tag</span><span class="p">.</span><span class="n">memory_areas</span><span class="p">());</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// this is the new part</span>
+<span class="w">    </span><span class="n">memory</span><span class="o">::</span><span class="n">remap_the_kernel</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">frame_allocator</span><span class="p">,</span><span class="w"> </span><span class="n">boot_info</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>If you see the <code>It did not crash</code> message, the kernel survived our page table modifications without causing a CPU exception. But did we map the kernel sections correctly?</p>
+
+<p>Let&rsquo;s try it out by switching to the new table! We identity map all kernel sections, so it should work without problems.</p>
+
+<h2 id="switching-tables">Switching Tables</h2>
+
+<p>Switching tables is easy. We just need to reload the <code>CR3</code> register with the physical address of the new P4 frame.</p>
+
+<p>We do this in a new <code>ActivePageTable::switch</code> method:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in `impl ActivePageTable` in src/memory/paging/mod.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">switch</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">new_table</span><span class="o">:</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">x86</span><span class="o">::</span><span class="n">controlregs</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">old_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">InactivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">p4_frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="w"></span>
+<span class="w">            </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">controlregs</span><span class="o">::</span><span class="n">cr3</span><span class="p">()</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="w"></span>
+<span class="w">        </span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">controlregs</span><span class="o">::</span><span class="n">cr3_write</span><span class="p">(</span><span class="n">new_table</span><span class="p">.</span><span class="n">p4_frame</span><span class="p">.</span><span class="n">start_address</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u64</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">old_table</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>This function activates the given inactive table and returns the previous active table as a <code>InactivePageTable</code>. We don&rsquo;t need to flush the TLB here, as the CPU does it automatically when the P4 table is switched. In fact, the <code>tlb::flush_all</code> function, which we used above, does nothing more than <a href="https://github.com/gz/rust-x86/blob/master/src/tlb.rs#L19">reloading the CR3 register</a>.</p>
+
+<p>Now we are finally able to switch to the new table. We do it by adding the following lines to our <code>remap_the_kernel</code> function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in remap_the_kernel in src/memory/paging/mod.rs</span>
+
+<span class="p">...</span><span class="w"></span>
+<span class="n">active_table</span><span class="p">.</span><span class="n">with</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">new_table</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">temporary_page</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">mapper</span><span class="o">|</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="p">});</span><span class="w"></span>
+
+<span class="kd">let</span><span class="w"> </span><span class="n">old_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">active_table</span><span class="p">.</span><span class="n">switch</span><span class="p">(</span><span class="n">new_table</span><span class="p">);</span><span class="w"></span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;NEW TABLE!!!&quot;</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+
+<p>Let&rsquo;s cross our fingers and run it…</p>
+
+<p>… and it fails with a boot loop.</p>
+
+<h3 id="debugging">Debugging</h3>
+
+<p>A QEMU boot load indicates that some CPU exception occured. We can see all thrown CPU exception by starting QEMU with <code>-d int</code> (as described <a href="/set-up-rust.html#debugging">here</a>):</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span></span>&gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
+...
+check_exception old: 0xffffffff new 0xe
+     0: <span class="nv">v</span><span class="o">=</span>0e <span class="nv">e</span><span class="o">=</span><span class="m">0002</span> <span class="nv">i</span><span class="o">=</span><span class="m">0</span> <span class="nv">cpl</span><span class="o">=</span><span class="m">0</span> <span class="nv">IP</span><span class="o">=</span>0008:000000000010ab97 <span class="nv">pc</span><span class="o">=</span>000000000010ab97
+        <span class="nv">SP</span><span class="o">=</span>0010:00000000001182d0 <span class="nv">CR2</span><span class="o">=</span>00000000000b8f00
+...
+</code></pre></div>
+
+<p>These lines are the important ones. We can read many useful information from them:</p>
+
+<ul>
+<li><p><code>v=0e</code>: An exception with number <code>0xe</code> occurred, which is a page fault according to the <a href="http://wiki.osdev.org/Exceptions">OSDev Wiki</a>.</p></li>
+
+<li><p><code>e=0002</code>: The CPU set an <a href="http://wiki.osdev.org/Exceptions#Error_code">error code</a>, which tells us why the exception occurred. The <code>0x2</code> bit tells us that it was caused by a write operation. And since the <code>0x1</code> bit is not set, the target page was not present.</p></li>
+
+<li><p><code>IP=0008:000000000010ab97</code> or <code>pc=000000000010ab97</code>: The program counter register tells us that the exception occurred when the CPU tried to execute the instruction at <code>0x10ab97</code>. We can disassemble this address to see the corresponding function. The <code>0008:</code> prefix in <code>IP</code> indicates the code <a href="/entering-longmode.html#loading-the-gdt">GDT segment</a>.</p></li>
+
+<li><p><code>SP=0010:00000000001182d0</code>: The stack pointer was <code>0x1182d0</code> (the <code>0010:</code> prefix indicates the data <a href="/entering-longmode.html#loading-the-gdt">GDT segment</a>). This tells us if it the stack overflowed.</p></li>
+
+<li><p><code>CR2=00000000000b8f00</code>: Finally the most useful register. It tells us which virtual address caused the page fault. In our case it&rsquo;s <code>0xb8f00</code>, which is part of the <a href="/printing-to-screen.html#the-vga-text-buffer">VGA text buffer</a>.</p></li>
+</ul>
+
+<p>So let&rsquo;s find out which function caused the exception:</p>
+<div class="highlight"><pre><span></span>objdump -d build/kernel-x86_64.bin | grep -B100 &quot;10ab97&quot;
+</pre></div>
+
+<p>We disassemble our kernel and search for <code>10ab97</code>. The <code>-B100</code> option prints the 100 preceeding lines too. The output tells us the responsible function:</p>
+<div class="highlight"><pre><span></span>...
+000000000010aa80 &lt;_ZN10vga_buffer6Writer10write_byte20h4601f5e405b6e89facaE&gt;:
+  10aa80:	55                   	push   %rbp
+  ...
+  10ab93:	66 8b 55 aa          	mov    -0x56(%rbp),%dx
+  10ab97:	66 89 14 48          	mov    %dx,(%rax,%rcx,2)
+</pre></div>
+
+<p>The reason for the cryptical function name is Rust&rsquo;s <a href="https://en.wikipedia.org/wiki/Name_mangling">name mangling</a>. But we can identity the <code>vga_buffer::Writer::write_byte</code> function nonetheless.</p>
+
+<p>So the reason for the page fault is that the <code>write_byte</code> function tried to write to the VGA text buffer at <code>0xb8f00</code>. Of course this provokes a page fault: We forgot to identity map the VGA buffer in the new page table.</p>
+
+<p>The fix is pretty simple:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/paging/mod.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">remap_the_kernel</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">,</span><span class="w"> </span><span class="n">boot_info</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BootInformation</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="n">active_table</span><span class="p">.</span><span class="n">with</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">new_table</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">temporary_page</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">mapper</span><span class="o">|</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="p">...</span><span class="w"></span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">section</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="p">.</span><span class="n">sections</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="p">...</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="c1">// identity map the VGA text buffer</span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">vga_buffer_frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="mh">0xb8000</span><span class="p">);</span><span class="w"> </span><span class="c1">// new</span>
+<span class="w">        </span><span class="n">mapper</span><span class="p">.</span><span class="n">identity_map</span><span class="p">(</span><span class="n">vga_buffer_frame</span><span class="p">,</span><span class="w"> </span><span class="n">WRITABLE</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="p">);</span><span class="w"> </span><span class="c1">// new</span>
+<span class="w">    </span><span class="p">});</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">old_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">active_table</span><span class="p">.</span><span class="n">switch</span><span class="p">(</span><span class="n">new_table</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;NEW TABLE!!!&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we should see the <code>NEW TABLE!!!</code> message (and also the <code>It did not crash!</code> line again). Congratulations! We successfully switched our kernel to a new page table!</p>
+
+<h3 id="fixing-the-frame-allocator">Fixing the Frame Allocator</h3>
+
+<p>The same problem as above occurs when we try to use our <a href="http://os.phil-opp.com/allocating-frames.html#the-allocator">AreaFrameAllocator</a> again. Try to add the following to <code>rust_main</code> after switching to the new table:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(</span><span class="n">multiboot_information_address</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="n">memory</span><span class="o">::</span><span class="n">remap_the_kernel</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">frame_allocator</span><span class="p">,</span><span class="w"> </span><span class="n">boot_info</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">frame_allocator</span><span class="p">.</span><span class="n">allocate_frame</span><span class="p">();</span><span class="w"> </span><span class="c1">// new: try to allocate a frame</span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+
+<p>This causes the same bootloop as above. The reason is that the <code>AreaFrameAllocator</code> uses the memory map of the Multiboot information structure. But we did not map the Multiboot structure, so it causes a page fault. To fix it, we identity map it as well:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in `remap_the_kernel` in src/memory/paging/mod.rs</span>
+<span class="n">active_table</span><span class="p">.</span><span class="n">with</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">new_table</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">temporary_page</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">mapper</span><span class="o">|</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// … identity map the allocated kernel sections</span>
+<span class="w">    </span><span class="c1">// … identity map the VGA text buffer</span>
+
+<span class="w">    </span><span class="c1">// new:</span>
+<span class="w">    </span><span class="c1">// identity map the multiboot info structure</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">multiboot_start</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">boot_info</span><span class="p">.</span><span class="n">start_address</span><span class="p">());</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">multiboot_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">boot_info</span><span class="p">.</span><span class="n">end_address</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">range_inclusive</span><span class="p">(</span><span class="n">multiboot_start</span><span class="p">,</span><span class="w"> </span><span class="n">multiboot_end</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">mapper</span><span class="p">.</span><span class="n">identity_map</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">PRESENT</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">});</span><span class="w"></span>
+</code></pre></div>
+
+<p>Normally the multiboot struct fits on one page. But GRUB can place it anywhere, so it could randomly cross a page boundary. Therefore we use <code>range_inclusive</code> to be on the safe side. Note that we need to subtract 1 to get the address of the last byte because the end address is exclusive.</p>
+
+<p>Now we should be able to allocate frames again.</p>
+
+<h2 id="using-the-correct-flags">Using the Correct Flags</h2>
+
+<p>Right now, our new table maps all kernel sections as writable and executable. To fix this, we add a <code>EntryFlags::from_elf_section_flags</code> function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/paging/entry.rs</span>
+
+<span class="kn">use</span><span class="w"> </span><span class="n">multiboot2</span><span class="o">::</span><span class="n">ElfSection</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">EntryFlags</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">from_elf_section_flags</span><span class="p">(</span><span class="n">section</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ElfSection</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">EntryFlags</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kn">use</span><span class="w"> </span><span class="n">multiboot2</span><span class="o">::</span><span class="p">{</span><span class="n">ELF_SECTION_ALLOCATED</span><span class="p">,</span><span class="w"> </span><span class="n">ELF_SECTION_WRITABLE</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">ELF_SECTION_EXECUTABLE</span><span class="p">};</span><span class="w"></span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">EntryFlags</span><span class="o">::</span><span class="n">empty</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="n">section</span><span class="p">.</span><span class="n">flags</span><span class="p">().</span><span class="n">contains</span><span class="p">(</span><span class="n">ELF_SECTION_ALLOCATED</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="c1">// section is loaded to memory</span>
+<span class="w">            </span><span class="n">flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">PRESENT</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="n">section</span><span class="p">.</span><span class="n">flags</span><span class="p">().</span><span class="n">contains</span><span class="p">(</span><span class="n">ELF_SECTION_WRITABLE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">WRITABLE</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">section</span><span class="p">.</span><span class="n">flags</span><span class="p">().</span><span class="n">contains</span><span class="p">(</span><span class="n">ELF_SECTION_EXECUTABLE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">NO_EXECUTE</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="n">flags</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>It just converts the ELF section flags to page table flags.</p>
+
+<p>Now we can use it to fix the <code>TODO</code> in our <code>remap_the_kernel</code> function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/paging/mod.rs</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">remap_the_kernel</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">,</span><span class="w"> </span><span class="n">boot_info</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BootInformation</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="n">active_table</span><span class="p">.</span><span class="n">with</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">new_table</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">temporary_page</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">mapper</span><span class="o">|</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="p">...</span><span class="w"></span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">section</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">elf_sections_tag</span><span class="p">.</span><span class="n">sections</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="p">...</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">section</span><span class="p">.</span><span class="n">is_allocated</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="c1">// section is not loaded to memory</span>
+<span class="w">                </span><span class="k">continue</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="p">...</span><span class="w"></span>
+<span class="w">            </span><span class="c1">// this is the new part</span>
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">EntryFlags</span><span class="o">::</span><span class="n">from_elf_section_flags</span><span class="p">(</span><span class="n">section</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="p">...</span><span class="w"></span>
+<span class="w">            </span><span class="k">for</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">Frame</span><span class="o">::</span><span class="n">range_inclusive</span><span class="p">(</span><span class="n">start_frame</span><span class="p">,</span><span class="w"> </span><span class="n">end_frame</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">mapper</span><span class="p">.</span><span class="n">identity_map</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="p">});</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>But when we test it now, we get a page fault again. We can use the same technique as above to get the responsible function. I won&rsquo;t bother you with the QEMU output and just tell you the results:</p>
+
+<p>This time the responsible function is <code>controlregs::cr3_write()</code> itself. From the <a href="http://wiki.osdev.org/Exceptions#Error_code">error code</a> we learn that it was a page protection violation and caused by “reading a 1 in a reserved field”. So the page table had some reserved bit set that should be always 0. It must be the <code>NO_EXECUTE</code> flag, since it&rsquo;s the only new bit that we set in the page table.</p>
+
+<h3 id="the-nxe-bit">The NXE Bit</h3>
+
+<p>The reason is that the <code>NO_EXECUTE</code> bit must only be used when the <code>NXE</code> bit in the <a href="https://en.wikipedia.org/wiki/Control_register#EFER">Extended Feature Enable Register</a> (EFER) is set. That register is similar to Rust&rsquo;s feature gating and can be used to enable all sorts of advanced CPU features. Since the <code>NXE</code> bit is off by default, we caused a page fault when we added the <code>NO_EXECUTE</code> bit to the page table.</p>
+
+<p>So we need to enable the <code>NXE</code> bit. Therefor we use Gerd Zellweger&rsquo;s awesome <a href="https://github.com/gz/rust-x86">x86</a> crate again:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in lib.rs</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">enable_nxe_bit</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">x86</span><span class="o">::</span><span class="n">msr</span><span class="o">::</span><span class="p">{</span><span class="n">IA32_EFER</span><span class="p">,</span><span class="w"> </span><span class="n">rdmsr</span><span class="p">,</span><span class="w"> </span><span class="n">wrmsr</span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">nxe_bit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">11</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">efer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rdmsr</span><span class="p">(</span><span class="n">IA32_EFER</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">wrmsr</span><span class="p">(</span><span class="n">IA32_EFER</span><span class="p">,</span><span class="w"> </span><span class="n">efer</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">nxe_bit</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The unsafe block is needed since accessing the <code>EFER</code> register is only allowed in kernel mode. But we are in kernel mode, so everything is fine.</p>
+
+<p>When we call this function before calling <code>remap_the_kernel</code>, everything should work again.</p>
+
+<h3 id="the-write-protect-bit">The Write Protect Bit</h3>
+
+<p>Right now, we are still able to modify the <code>.code</code> and <code>.rodata</code> sections, even though we did not set the <code>WRITABLE</code> flag for them. The reason is that the CPU ignores this bit in kernel mode by default. To enable write protection for the kernel as well, we need to set the <em>Write Protect</em> bit in the <code>CR0</code> register:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in lib.rs</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">enable_write_protect_bit</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">x86</span><span class="o">::</span><span class="n">controlregs</span><span class="o">::</span><span class="p">{</span><span class="n">cr0</span><span class="p">,</span><span class="w"> </span><span class="n">cr0_write</span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">wp_bit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">16</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">cr0_write</span><span class="p">(</span><span class="n">cr0</span><span class="p">()</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">wp_bit</span><span class="p">)</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>cr0</code> functions are unsafe because accessing the <code>CR0</code> register is only allowed in kernel mode.</p>
+
+<p>If we haven&rsquo;t forgotten to set the <code>WRITABLE</code> flag somewhere, it should still work without crashing.</p>
+
+<h2 id="creating-a-guard-page">Creating a Guard Page</h2>
+
+<p>The final step is to create a guard page for our kernel stack.</p>
+
+<p>The decision to place the kernel stack right above the page tables was already useful to detect a silent stack overflow in the <a href="/modifying-page-tables.html#translate">previous post</a>. Now we profit from it again. Let&rsquo;s look at our assembly <code>.bss</code> section again to understand why:</p>
+<div class="highlight"><pre><code class="language-nasm" data-lang="nasm"><span></span><span class="c1">; in src/arch/x86_64/boot.asm</span>
+
+<span class="k">section</span> <span class="nv">.bss</span>
+<span class="k">align</span> <span class="mi">4096</span>
+<span class="nl">p4_table:</span>
+    <span class="kd">resb</span> <span class="mi">4096</span>
+<span class="nl">p3_table:</span>
+    <span class="kd">resb</span> <span class="mi">4096</span>
+<span class="nl">p2_table:</span>
+    <span class="kd">resb</span> <span class="mi">4096</span>
+<span class="nl">stack_bottom:</span>
+    <span class="kd">resb</span> <span class="mi">4096</span> <span class="o">*</span> <span class="mi">2</span>
+<span class="nl">stack_top:</span>
+</code></pre></div>
+
+<p>The old page tables are right below the stack. They are still identity mapped since they are part of the kernel&rsquo;s <code>.bss</code> section. We just need to turn the old <code>p4_table</code> into a guard page to secure the kernel stack. That way we even reuse the memory of the old P3 and P2 tables to increase the stack size.</p>
+
+<p>So let&rsquo;s implement it:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/paging/mod.rs</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">remap_the_kernel</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">,</span><span class="w"> </span><span class="n">boot_info</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BootInformation</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">old_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">active_table</span><span class="p">.</span><span class="n">switch</span><span class="p">(</span><span class="n">new_table</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;NEW TABLE!!!&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// below is the new part</span>
+
+<span class="w">    </span><span class="c1">// turn the old p4 page into a guard page</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">old_p4_page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Page</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="w"></span>
+<span class="w">      </span><span class="n">old_table</span><span class="p">.</span><span class="n">p4_frame</span><span class="p">.</span><span class="n">start_address</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">active_table</span><span class="p">.</span><span class="n">unmap</span><span class="p">(</span><span class="n">old_p4_page</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;guard page at {:#x}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">old_p4_page</span><span class="p">.</span><span class="n">start_address</span><span class="p">());</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we have a very basic guard page: The page below the stack is unmapped, so a stack overflow causes an immediate page fault. Thus, silent stack overflows are no longer possible.</p>
+
+<p>Or to be precise, they are improbable. If we have a function with many big stack variables, it&rsquo;s possible that the guard page is missed. For example, the following function could still corrupt memory below the stack:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">fn</span><span class="w"> </span><span class="n">stack_overflow</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="mi">99999</span><span class="p">];</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>This creates a very big array on the stack, which is currently filled from bottom to top. Therefore it misses the guard page and overwrites some memory below the stack. Eventually it hits the bottom of the guard page and causes a page fault. But before, it messes up memory, which is bad.</p>
+
+<p>Fortunately, there exists a solution called <em>stack probes</em>. The basic idea is to check all required stack pages at the beginning of each function. For example, a function that needs 9000 bytes on the stack would try to access <code>SP + 0</code>, <code>SP + 4096</code>, and <code>SP + 2 * 4096</code> (<code>SP</code> is the stack pointer). If the stack is not big enough, the guard page is hit and a page fault occurs. The function can&rsquo;t mess up memory anymore since the stack check occurs right at its start.</p>
+
+<p>Unfortunately stack probes require compiler support. They already work on Windows but they don&rsquo;t exist on Linux yet. The problem seems to be in LLVM, which Rust uses as backend. Hopefully it gets resolved soon so that our kernel stack becomes safe. For the current status and more information about stack probes check out the <a href="https://github.com/rust-lang/rust/issues/16012#issuecomment-160380183">tracking issue</a>.</p>
+
+<h2 id="what-s-next">What&rsquo;s next?</h2>
+
+<p>Now that we have a (mostly) safe kernel stack and a working page table module, we can add a virtual memory allocator. The <a href="/kernel-heap.html">next post</a> will explore Rust&rsquo;s allocator API and create a very basic allocator. At the end of that post, we will be able to use Rust&rsquo;s allocation and collections types such as <a href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html">Box</a>, <a href="https://doc.rust-lang.org/nightly/collections/vec/struct.Vec.html">Vec</a>, or even <a href="https://doc.rust-lang.org/nightly/collections/struct.BTreeMap.html">BTreeMap</a>.</p>
+<div class="footnotes">
+
+<hr />
+
+<ol>
+<li id="fn:fn-debug-notes">For this post the most useful GDB command is probably <code>p/x *((long int*)0xfffffffffffff000)@512</code>. It prints all entries of the recursively mapped P4 table by interpreting it as an array of 512 long ints (the <code>@512</code> is GDB&rsquo;s array syntax). Of course you can also print other tables by adjusting the address.
+ <a class="footnote-return" href="#fnref:fn-debug-notes"><sup>[return]</sup></a></li>
+<li id="fn:fn-apt-renamed">It was renamed in <a href="https://github.com/phil-opp/blog_os/pull/88">#88</a>. The previous name was <code>RecursivePageTable</code>.
+ <a class="footnote-return" href="#fnref:fn-apt-renamed"><sup>[return]</sup></a></li>
+</ol>
+</div>
+
+</article>
+
+<hr>
+<div class="PageNavigation">
+  
+    <a class="prev" href="/modifying-page-tables.html">&laquo; Page Tables</a>
+  
+  
+    <a class="next" href="/kernel-heap.html">Kernel Heap &raquo;</a>
+  
+</div>
+<hr>
+
+<div id="disqus_thread"></div>
+<script>
+  (function() {
+    
+    
+    if (window.location.hostname == "localhost")
+        return;
+
+    var d = document, s = d.createElement('script');
+
+    s.src = '//phil-opp.disqus.com/embed.js';
+
+    s.setAttribute('data-timestamp', +new Date());
+    (d.head || d.body).appendChild(s);
+  })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript" rel="nofollow">comments powered by Disqus.</a></noscript>
+
+</main>
+
+<footer class="footer">
+  <small>
+    &copy;
+    <time datetime="2016">2016</time>. All rights reserved.
+    <a href="/contact.html">Contact</a>
+  </small>
+</footer>
+</div>
+
+</body>
+</html>
+

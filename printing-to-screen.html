@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <meta http-equiv="X-Frame-Options" content="sameorigin">
+  
+  
+
+  <title>
+    Printing to Screen &middot; Writing an OS in Rust
+  </title>
+
+  <link rel="canonical" href="http://os.phil-opp.com/printing-to-screen.html">
+
+  
+  <link rel="stylesheet" href="/css/poole.css">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/syntax.css">
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/images/apple-touch-icon-precomposed.png">
+  <link rel="shortcut icon" href="/images/favicon.ico">
+
+  
+
+  <script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-65296949-1', 'auto');
+  ga('send', 'pageview');
+
+</script>
+
+</head>
+
+<body>
+<div class="container content">
+
+<header class="masthead">
+  <h3 class="masthead-title">
+    <a href="/" title="Home">Writing an OS in Rust</a>
+    <span class="navigation">
+      <small><a href="/atom.xml"><img src="/images/feed-icon.png" alt="RSS"></a></small>
+    </span>
+    <small>Philipp&nbsp;Oppermann's&nbsp;blog</small>
+  </h3>
+</header>
+
+<main>
+
+
+<article class="post">
+  <h1 class="post-title">Printing to Screen</h1>
+  <time datetime="2015-10-23" class="post-date">
+    Oct 23, 2015
+    
+  </time>
+
+  
+
+<p>In the <a href="/set-up-rust.html">previous post</a> we switched from assembly to <a href="https://www.rust-lang.org/">Rust</a>, a systems programming language that provides great safety. But so far we are using unsafe features like <a href="https://doc.rust-lang.org/book/raw-pointers.html">raw pointers</a> whenever we want to print to screen. In this post we will create a Rust module that provides a safe and easy-to-use interface for the VGA text buffer. It will support Rust&rsquo;s <a href="https://doc.rust-lang.org/std/fmt/#related-macros">formatting macros</a>, too.</p>
+
+<p>This post uses recent unstable features, so you need an up-to-date nighly compiler. If you have any questions, problems, or suggestions please <a href="https://github.com/phil-opp/blog_os/issues">file an issue</a> or create a comment at the bottom. The code from this post is also available on <a href="https://github.com/phil-opp/blog_os/tree/printing_to_screen">Github</a>.</p>
+
+<h2 id="the-vga-text-buffer">The VGA Text Buffer</h2>
+
+<p>The text buffer starts at physical address <code>0xb8000</code> and contains the characters displayed on screen. It has 25 rows and 80 columns. Each screen character has the following format:</p>
+
+<table>
+<thead>
+<tr>
+<th>Bit(s)</th>
+<th>Value</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td>0-7</td>
+<td>ASCII code point</td>
+</tr>
+
+<tr>
+<td>8-11</td>
+<td>Foreground color</td>
+</tr>
+
+<tr>
+<td>12-14</td>
+<td>Background color</td>
+</tr>
+
+<tr>
+<td>15</td>
+<td>Blink</td>
+</tr>
+</tbody>
+</table>
+
+<p>The following colors are available:</p>
+
+<table>
+<thead>
+<tr>
+<th>Number</th>
+<th>Color</th>
+<th>Number + Bright Bit</th>
+<th>Bright Color</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td>0x0</td>
+<td>Black</td>
+<td>0x8</td>
+<td>Dark Gray</td>
+</tr>
+
+<tr>
+<td>0x1</td>
+<td>Blue</td>
+<td>0x9</td>
+<td>Light Blue</td>
+</tr>
+
+<tr>
+<td>0x2</td>
+<td>Green</td>
+<td>0xa</td>
+<td>Light Green</td>
+</tr>
+
+<tr>
+<td>0x3</td>
+<td>Cyan</td>
+<td>0xb</td>
+<td>Light Cyan</td>
+</tr>
+
+<tr>
+<td>0x4</td>
+<td>Red</td>
+<td>0xc</td>
+<td>Light Red</td>
+</tr>
+
+<tr>
+<td>0x5</td>
+<td>Magenta</td>
+<td>0xd</td>
+<td>Pink</td>
+</tr>
+
+<tr>
+<td>0x6</td>
+<td>Brown</td>
+<td>0xe</td>
+<td>Yellow</td>
+</tr>
+
+<tr>
+<td>0x7</td>
+<td>Light Gray</td>
+<td>0xf</td>
+<td>White</td>
+</tr>
+</tbody>
+</table>
+
+<p>Bit 4 is the <em>bright bit</em>, which turns for example blue into light blue. It is unavailable in background color as the bit is used to control if the text should blink. If you want to use a light background color (e.g. white) you have to disable blinking through a <a href="http://www.ctyme.com/intr/rb-0117.htm">BIOS function</a>.</p>
+
+<h2 id="a-basic-rust-module">A basic Rust Module</h2>
+
+<p>Now that we know how the VGA buffer works, we can create a Rust module to handle printing:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+<span class="kn">mod</span><span class="w"> </span><span class="n">vga_buffer</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>The content of this module can live either in <code>src/vga_buffer.rs</code> or <code>src/vga_buffer/mod.rs</code>. The latter supports submodules while the former does not. But our module does not need any submodules so we create it as <code>src/vga_buffer.rs</code>.</p>
+
+<p>All of the code below goes into our new module (unless specified otherwise).</p>
+
+<h3 id="colors">Colors</h3>
+
+<p>First, we represent the different colors using an enum:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[allow(dead_code)]</span><span class="w"></span>
+<span class="cp">#[repr(u8)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="n">Color</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">Black</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Blue</span><span class="w">       </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Green</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Cyan</span><span class="w">       </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Red</span><span class="w">        </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Magenta</span><span class="w">    </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Brown</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="mi">6</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">LightGray</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">DarkGray</span><span class="w">   </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">LightBlue</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="mi">9</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">LightGreen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">LightCyan</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="mi">11</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">LightRed</span><span class="w">   </span><span class="o">=</span><span class="w"> </span><span class="mi">12</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Pink</span><span class="w">       </span><span class="o">=</span><span class="w"> </span><span class="mi">13</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Yellow</span><span class="w">     </span><span class="o">=</span><span class="w"> </span><span class="mi">14</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">White</span><span class="w">      </span><span class="o">=</span><span class="w"> </span><span class="mi">15</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We use a <a href="http://rustbyexample.com/custom_types/enum/c_like.html">C-like enum</a> here to explicitly specify the number for each color. Because of the <code>repr(u8)</code> attribute each enum variant is stored as an <code>u8</code>. Actually 4 bits would be sufficient, but Rust doesn&rsquo;t have an <code>u4</code> type.</p>
+
+<p>Normally the compiler would issue a warning for each unused variant. By using the <code>#[allow(dead_code)]</code> attribute we disable these warnings for the <code>Color</code> enum.</p>
+
+<p>To represent a full color code that specifies foreground and background color, we create a <a href="https://aturon.github.io/features/types/newtype.html">newtype</a> on top of <code>u8</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">struct</span><span class="w"> </span><span class="n">ColorCode</span><span class="p">(</span><span class="kt">u8</span><span class="p">);</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">ColorCode</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">(</span><span class="n">foreground</span><span class="o">:</span><span class="w"> </span><span class="n">Color</span><span class="p">,</span><span class="w"> </span><span class="n">background</span><span class="o">:</span><span class="w"> </span><span class="n">Color</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">ColorCode</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">ColorCode</span><span class="p">((</span><span class="n">background</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="n">foreground</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u8</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>ColorCode</code> contains the full color byte, containing foreground and background color. Blinking is enabled implicitly by using a bright background color (soon we will disable blinking anyway). The <code>new</code> function is a <a href="https://github.com/rust-lang/rfcs/blob/master/text/0911-const-fn.md">const function</a> to allow it in static initializers. As <code>const</code> functions are unstable we need to add the <code>const_fn</code> feature in <code>src/lib.rs</code>.</p>
+
+<h3 id="the-text-buffer">The Text Buffer</h3>
+
+<p>Now we can add structures to represent a screen character and the text buffer:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[repr(C)]</span><span class="w"></span>
+<span class="k">struct</span><span class="w"> </span><span class="n">ScreenChar</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">ascii_character</span><span class="o">:</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">color_code</span><span class="o">:</span><span class="w"> </span><span class="n">ColorCode</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">BUFFER_HEIGHT</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">25</span><span class="p">;</span><span class="w"></span>
+<span class="kr">const</span><span class="w"> </span><span class="n">BUFFER_WIDTH</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">80</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">struct</span><span class="w"> </span><span class="n">Buffer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">chars</span><span class="o">:</span><span class="w"> </span><span class="p">[[</span><span class="n">ScreenChar</span><span class="p">;</span><span class="w"> </span><span class="n">BUFFER_WIDTH</span><span class="p">];</span><span class="w"> </span><span class="n">BUFFER_HEIGHT</span><span class="p">],</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Since the field ordering in default structs is undefined in Rust, we need the <a href="https://doc.rust-lang.org/nightly/nomicon/other-reprs.html#reprc">repr&copy;</a> attribute. It guarantees that the struct&rsquo;s fields are laid out exactly like in a C struct and thus guarantees the correct field ordering.</p>
+
+<p>To actually write to screen, we now create a writer type:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">column_position</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">color_code</span><span class="o">:</span><span class="w"> </span><span class="n">ColorCode</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">buffer</span><span class="o">:</span><span class="w"> </span><span class="n">Unique</span><span class="o">&lt;</span><span class="n">Buffer</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The writer will always write to the last line and shift lines up when a line is full (or on <code>\n</code>). The <code>column_position</code> field keeps track of the current position in the last row. The current foreground and background colors are specified by <code>color_code</code> and a pointer to the VGA buffer is stored in <code>buffer</code>. To make it possible to create a <code>static</code> Writer later, the <code>buffer</code> field stores an <code>Unique&lt;Buffer&gt;</code> instead of a plain <code>*mut Buffer</code>. <a href="https://doc.rust-lang.org/nightly/core/ptr/struct.Unique.html">Unique</a> is a wrapper that implements Send/Sync and is thus usable as a <code>static</code>. Since it&rsquo;s unstable, you may need to add the <code>unique</code> feature to <code>lib.rs</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+<span class="cp">#![feature(unique)]</span><span class="w"></span>
+</code></pre></div>
+
+<h2 id="printing-to-screen">Printing to Screen</h2>
+
+<p>Now we can use the <code>Writer</code> to modify the buffer&rsquo;s characters. First we create a method to write a single ASCII byte (it doesn&rsquo;t compile yet):</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">impl</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">write_byte</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">byte</span><span class="o">:</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">match</span><span class="w"> </span><span class="n">byte</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="sc">b&#39;\n&#39;</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">new_line</span><span class="p">(),</span><span class="w"></span>
+<span class="w">            </span><span class="n">byte</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">column_position</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">BUFFER_WIDTH</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="bp">self</span><span class="p">.</span><span class="n">new_line</span><span class="p">();</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">                </span><span class="kd">let</span><span class="w"> </span><span class="n">row</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BUFFER_HEIGHT</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">                </span><span class="kd">let</span><span class="w"> </span><span class="n">col</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">column_position</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">                </span><span class="bp">self</span><span class="p">.</span><span class="n">buffer</span><span class="p">().</span><span class="n">chars</span><span class="p">[</span><span class="n">row</span><span class="p">][</span><span class="n">col</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ScreenChar</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="n">ascii_character</span><span class="o">:</span><span class="w"> </span><span class="n">byte</span><span class="p">,</span><span class="w"></span>
+<span class="w">                    </span><span class="n">color_code</span><span class="o">:</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">color_code</span><span class="p">,</span><span class="w"></span>
+<span class="w">                </span><span class="p">};</span><span class="w"></span>
+<span class="w">                </span><span class="bp">self</span><span class="p">.</span><span class="n">column_position</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">buffer</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Buffer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">unsafe</span><span class="p">{</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">buffer</span><span class="p">.</span><span class="n">get_mut</span><span class="p">()</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">new_line</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="cm">/* TODO */</span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>If the byte is the <a href="https://en.wikipedia.org/wiki/Newline">newline</a> byte <code>\n</code>, the writer does not print anything. Instead it calls a <code>new_line</code> method, which we&rsquo;ll implement later. Other bytes get printed to the screen in the second match case.</p>
+
+<p>When printing a byte, the writer checks if the current line is full. In that case, a <code>new_line</code> call is required before to wrap the line. Then it writes a new <code>ScreenChar</code> to the buffer at the current position. Finally, the current column position is advanced.</p>
+
+<p>The <code>buffer()</code> auxiliary method converts the raw pointer in the <code>buffer</code> field into a safe mutable buffer reference. The unsafe block is needed because the <a href="https://doc.rust-lang.org/nightly/core/ptr/struct.Unique.html#method.get_mut">get_mut()</a> method of <code>Unique</code> is unsafe. But our <code>buffer()</code> method itself isn&rsquo;t marked as unsafe, so it must not introduce any unsafety (e.g. cause segfaults). To guarantee that, it&rsquo;s very important that the <code>buffer</code> field always points to a valid <code>Buffer</code>. It&rsquo;s like a contract that we must stand to every time we create a <code>Writer</code>. To ensure that it&rsquo;s not possible to create an invalid <code>Writer</code> from outside of the module, the struct must have at least one private field and public creation functions are not allowed either.</p>
+
+<h3 id="cannot-move-out-of-borrowed-content">Cannot Move out of Borrowed Content</h3>
+
+<p>When we try to compile it, we get the following error:</p>
+<div class="highlight"><pre><span></span><span class="n">error</span><span class="o">:</span> <span class="n">cannot</span> <span class="n">move</span> <span class="n">out</span> <span class="n">of</span> <span class="n">borrowed</span> <span class="n">content</span> <span class="o">[</span><span class="n">E0507</span><span class="o">]</span>
+    <span class="n">color_code</span><span class="o">:</span> <span class="n">self</span><span class="o">.</span><span class="na">color_code</span><span class="o">,</span>
+                <span class="o">^~~~</span>
+</pre></div>
+
+<p>The reason it that Rust <em>moves</em> values by default instead of copying them like other languages. And we cannot move <code>color_code</code> out of <code>self</code> because we only borrowed <code>self</code>. For more information check out the <a href="https://doc.rust-lang.org/book/ownership.html">ownership section</a> in the Rust book. To fix it, we can implement the <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html">Copy trait</a> for the <code>ColorCode</code> type by adding <code>#[derive(Clone, Copy)]</code> to its struct.</p>
+
+<h3 id="try-it-out">Try it out!</h3>
+
+<p>To write some characters to the screen, you can create a temporary function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">print_something</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">writer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">column_position</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">color_code</span><span class="o">:</span><span class="w"> </span><span class="n">ColorCode</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">Color</span><span class="o">::</span><span class="n">LightGreen</span><span class="p">,</span><span class="w"> </span><span class="n">Color</span><span class="o">::</span><span class="n">Black</span><span class="p">),</span><span class="w"></span>
+<span class="w">        </span><span class="n">buffer</span><span class="o">:</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">Unique</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mh">0xb8000</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">writer</span><span class="p">.</span><span class="n">write_byte</span><span class="p">(</span><span class="sc">b&#39;H&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>It just creates a new Writer that points to the VGA buffer at <code>0xb8000</code>. Then it writes the byte <code>b'H'</code> to it. The <code>b</code> prefix creates a <a href="https://doc.rust-lang.org/reference.html#characters-and-strings">byte character</a>, which represents an ASCII code point. When we call <code>vga_buffer::print_something</code> in main, a <code>H</code> should be printed in the <em>lower</em> left corner of the screen in light green.</p>
+
+<h3 id="printing-strings">Printing Strings</h3>
+
+<p>To print whole strings, we can convert them to bytes and print them one-by-one:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in `impl Writer`</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">write_str</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">s</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="kt">str</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">byte</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">bytes</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="bp">self</span><span class="p">.</span><span class="n">write_byte</span><span class="p">(</span><span class="n">byte</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>You can try it yourself in the <code>print_something</code> function.</p>
+
+<p>When you print strings with some special characters like <code>ä</code> or <code>λ</code>, you&rsquo;ll notice that they cause weird symbols on screen. That&rsquo;s because they are represented by multiple bytes in <a href="http://www.fileformat.info/info/unicode/utf8.htm">UTF-8</a>. By converting them to bytes, we of course get strange results. But since the VGA buffer doesn&rsquo;t support UTF-8, it&rsquo;s not possible to display these characters anyway.</p>
+
+<h3 id="support-formatting-macros">Support Formatting Macros</h3>
+
+<p>It would be nice to support Rust&rsquo;s formatting macros, too. That way, we can easily print different types like integers or floats. To support them, we need to implement the <a href="https://doc.rust-lang.org/nightly/core/fmt/trait.Write.html">core::fmt::Write</a> trait. The only required method of this trait is <code>write_str</code> that looks quite similar to our <code>write_str</code> method. To implement the trait, we just need to move it into an <code>impl ::core::fmt::Write for Writer</code> block and add a return type:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">impl</span><span class="w"> </span><span class="o">::</span><span class="n">core</span><span class="o">::</span><span class="n">fmt</span><span class="o">::</span><span class="n">Write</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">write_str</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">s</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="kt">str</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">::</span><span class="n">core</span><span class="o">::</span><span class="n">fmt</span><span class="o">::</span><span class="nb">Result</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">byte</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">bytes</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="bp">self</span><span class="p">.</span><span class="n">write_byte</span><span class="p">(</span><span class="n">byte</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Ok</span><span class="p">(())</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>Ok(())</code> is just a <code>Ok</code> Result containing the <code>()</code> type. We can drop the <code>pub</code> because trait methods are always public.</p>
+
+<p>Now we can use Rust&rsquo;s built-in <code>write!</code>/<code>writeln!</code> formatting macros:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in the `print_something` function</span>
+<span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">writer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="p">{...};</span><span class="w"></span>
+<span class="n">writer</span><span class="p">.</span><span class="n">write_byte</span><span class="p">(</span><span class="sc">b&#39;H&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="n">writer</span><span class="p">.</span><span class="n">write_str</span><span class="p">(</span><span class="s">&quot;ello! &quot;</span><span class="p">);</span><span class="w"></span>
+<span class="n">write</span><span class="o">!</span><span class="p">(</span><span class="n">writer</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;The numbers are {} and {}&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="mf">1.0</span><span class="o">/</span><span class="mf">3.0</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now you should see a <code>Hello! The numbers are 42 and 0.3333333333333333</code> in strange colors at the bottom of the screen.</p>
+
+<h3 id="newlines">Newlines</h3>
+
+<p>Right now, we just ignore newlines and characters that don&rsquo;t fit into the line anymore. Instead we want to move every character one line up (the top line gets deleted) and start at the beginning of the last line again. To do this, we add an implementation for the <code>new_line</code> method of <code>Writer</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in `impl Writer`</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">new_line</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">row</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mi">0</span><span class="p">..(</span><span class="n">BUFFER_HEIGHT</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">buffer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">buffer</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="n">buffer</span><span class="p">.</span><span class="n">chars</span><span class="p">[</span><span class="n">row</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">buffer</span><span class="p">.</span><span class="n">chars</span><span class="p">[</span><span class="n">row</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">]</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">clear_row</span><span class="p">(</span><span class="n">BUFFER_HEIGHT</span><span class="o">-</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">column_position</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">clear_row</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">row</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="cm">/* TODO */</span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We just move each line to the line above. Notice that the range notation (<code>..</code>) is exclusive the upper bound. But when we try to compile it, we get an borrow checker error again:</p>
+<div class="highlight"><pre><span></span><span class="n">error</span><span class="o">:</span> <span class="n">cannot</span> <span class="n">move</span> <span class="n">out</span> <span class="n">of</span> <span class="n">indexed</span> <span class="n">content</span> <span class="o">[</span><span class="n">E0507</span><span class="o">]</span>
+    <span class="n">buffer</span><span class="o">.</span><span class="na">chars</span><span class="o">[</span><span class="n">row</span><span class="o">]</span> <span class="o">=</span> <span class="n">buffer</span><span class="o">.</span><span class="na">chars</span><span class="o">[</span><span class="n">row</span> <span class="o">+</span> <span class="mi">1</span><span class="o">]</span>
+                        <span class="o">^~~~~~~~~~~~~~~~~~~~~</span>
+</pre></div>
+
+<p>It&rsquo;s because of Rust&rsquo;s move semantics again: We try to move out the <code>ScreenChar</code> at <code>row + 1</code>. If Rust would allow that, the array would become invalid as it would contain some valid and some moved out values. Fortunately, the <code>ScreenChar</code> type meets all criteria for the <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Copy.html">Copy trait</a>, so we can fix the problem by adding <code>#[derive(Clone, Copy)]</code> to <code>ScreenChar</code>.</p>
+
+<p>Now we only need to implement the <code>clear_row</code> method to finish the newline code:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in `impl Writer`</span>
+<span class="k">fn</span><span class="w"> </span><span class="n">clear_row</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">row</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">blank</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ScreenChar</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">ascii_character</span><span class="o">:</span><span class="w"> </span><span class="sc">b&#39; &#39;</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="n">color_code</span><span class="o">:</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">color_code</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">buffer</span><span class="p">().</span><span class="n">chars</span><span class="p">[</span><span class="n">row</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">blank</span><span class="p">;</span><span class="w"> </span><span class="n">BUFFER_WIDTH</span><span class="p">];</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<h2 id="providing-an-interface">Providing an Interface</h2>
+
+<p>To provide a global writer that can used as an interface from other modules, we can add a <code>static</code> writer:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="n">WRITER</span><span class="o">:</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Writer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">column_position</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">color_code</span><span class="o">:</span><span class="w"> </span><span class="n">ColorCode</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">Color</span><span class="o">::</span><span class="n">LightGreen</span><span class="p">,</span><span class="w"> </span><span class="n">Color</span><span class="o">::</span><span class="n">Black</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">buffer</span><span class="o">:</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">Unique</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mh">0xb8000</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="p">},</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+</code></pre></div>
+
+<p>But we can&rsquo;t use it to print anything! You can try it yourself in the <code>print_something</code> function. The reason is that we try to take a mutable reference (<code>&amp;mut</code>) to a immutable <code>static</code> when calling <code>WRITER.print_byte</code>.</p>
+
+<p>To resolve it, we could use a <a href="https://doc.rust-lang.org/book/const-and-static.html#mutability">mutable static</a>. But then every read and write to it would be unsafe since it could easily introduce data races and other bad things. Using <code>static mut</code> is highly discouraged, there are even proposals to <a href="https://internals.rust-lang.org/t/pre-rfc-remove-static-mut/1437">remove it</a>.</p>
+
+<p>But what are the alternatives? We could try to use a cell type like <a href="https://doc.rust-lang.org/nightly/core/cell/struct.RefCell.html">RefCell</a> or even <a href="https://doc.rust-lang.org/nightly/core/cell/struct.UnsafeCell.html">UnsafeCell</a> to provide <a href="https://doc.rust-lang.org/book/mutability.html#interior-vs.-exterior-mutability">interior mutability</a>. But these types aren&rsquo;t <a href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html">Sync</a> (with good reason), so we can&rsquo;t use them in statics.</p>
+
+<p>To get synchronized interior mutability, users of the standard library can use <a href="https://doc.rust-lang.org/nightly/std/sync/struct.Mutex.html">Mutex</a>. It provides mutual exclusion by blocking threads when the resource is already locked. But our basic kernel does not have any blocking support or even a concept of threads, so we can&rsquo;t use it either. However there is a really basic kind of mutex in computer science that requires no operating system features: the <a href="https://en.wikipedia.org/wiki/Spinlock">spinlock</a>. Instead of blocking, the threads simply try to lock it again and again in a tight loop and thus burn CPU time until the mutex is free again.</p>
+
+<p>To use a spinning mutex, we can add the <a href="https://crates.io/crates/spin">spin crate</a> as a dependency:</p>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="c1"># in Cargo.toml</span>
+<span class="p">[</span><span class="n">dependencies</span><span class="p">]</span>
+<span class="n">rlibc</span> <span class="o">=</span> <span class="s">&quot;0.1.4&quot;</span>
+<span class="n">spin</span> <span class="o">=</span> <span class="s">&quot;0.3.4&quot;</span>
+</code></pre></div>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">spin</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>Then we can use the spinning Mutex to add interior mutability to our static writer:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/vga_buffer.rs again</span>
+<span class="kn">use</span><span class="w"> </span><span class="n">spin</span><span class="o">::</span><span class="n">Mutex</span><span class="p">;</span><span class="w"></span>
+<span class="p">...</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="n">WRITER</span><span class="o">:</span><span class="w"> </span><span class="n">Mutex</span><span class="o">&lt;</span><span class="n">Writer</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Mutex</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">Writer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">column_position</span><span class="o">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">color_code</span><span class="o">:</span><span class="w"> </span><span class="n">ColorCode</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">Color</span><span class="o">::</span><span class="n">LightGreen</span><span class="p">,</span><span class="w"> </span><span class="n">Color</span><span class="o">::</span><span class="n">Black</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">buffer</span><span class="o">:</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">Unique</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mh">0xb8000</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="p">},</span><span class="w"></span>
+<span class="p">});</span><span class="w"></span>
+</code></pre></div>
+
+<p><a href="https://mvdnes.github.io/rust-docs/spinlock-rs/spin/struct.Mutex.html#method.new">Mutex::new</a> is a const function, too, so it can be used in statics.</p>
+
+<p>Now we can easily print from our main function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">fmt</span><span class="o">::</span><span class="n">Write</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">vga_buffer</span><span class="o">::</span><span class="n">WRITER</span><span class="p">.</span><span class="n">lock</span><span class="p">().</span><span class="n">write_str</span><span class="p">(</span><span class="s">&quot;Hello again&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">write</span><span class="o">!</span><span class="p">(</span><span class="n">vga_buffer</span><span class="o">::</span><span class="n">WRITER</span><span class="p">.</span><span class="n">lock</span><span class="p">(),</span><span class="w"> </span><span class="s">&quot;, some numbers: {} {}&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="mf">1.337</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Note that we need to import the <code>Write</code> trait if we want to use its functions.</p>
+
+<h2 id="a-println-macro">A println macro</h2>
+
+<p>Rust&rsquo;s <a href="https://doc.rust-lang.org/nightly/book/macros.html">macro syntax</a> is a bit strange, so we won&rsquo;t try to write a macro from scratch. Instead we look at the source of the <a href="https://doc.rust-lang.org/nightly/std/macro.println!.html"><code>println!</code> macro</a> in the standard library:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="n">macro_rules</span><span class="o">!</span><span class="w"> </span><span class="n">println</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="cp">$fmt</span><span class="o">:</span><span class="n">expr</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">(</span><span class="n">print</span><span class="o">!</span><span class="p">(</span><span class="n">concat</span><span class="o">!</span><span class="p">(</span><span class="cp">$fmt</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">)));</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="cp">$fmt</span><span class="o">:</span><span class="n">expr</span><span class="p">,</span><span class="w"> </span><span class="cp">$($arg</span><span class="o">:</span><span class="n">tt</span><span class="p">)</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">(</span><span class="n">print</span><span class="o">!</span><span class="p">(</span><span class="n">concat</span><span class="o">!</span><span class="p">(</span><span class="cp">$fmt</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">),</span><span class="w"> </span><span class="cp">$($arg</span><span class="p">)</span><span class="o">*</span><span class="p">));</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>It just adds a <code>\n</code> and then invokes the <a href="https://doc.rust-lang.org/nightly/std/macro.print!.html"><code>print!</code> macro</a>, which is defined as:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="n">macro_rules</span><span class="o">!</span><span class="w"> </span><span class="n">print</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="cp">$($arg</span><span class="o">:</span><span class="n">tt</span><span class="p">)</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">(</span><span class="cp">$crate</span><span class="o">::</span><span class="n">io</span><span class="o">::</span><span class="n">_print</span><span class="p">(</span><span class="n">format_args</span><span class="o">!</span><span class="p">(</span><span class="cp">$($arg</span><span class="p">)</span><span class="o">*</span><span class="p">)));</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>It calls the <code>_print</code> method in the <code>io</code> module of the current crate (<code>$crate</code>), which is <code>std</code>. The <a href="https://doc.rust-lang.org/nightly/src/std/io/stdio.rs.html#578"><code>_print</code> function</a> in libstd is rather complicated, as it supports different <code>Stdout</code> devices.</p>
+
+<p>To print to the VGA buffer, we just copy the <code>println!</code> macro and modify the <code>print!</code> macro to use our static <code>WRITER</code> instead of <code>_print</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/vga_buffer.rs</span>
+<span class="n">macro_rules</span><span class="o">!</span><span class="w"> </span><span class="n">print</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="cp">$($arg</span><span class="o">:</span><span class="n">tt</span><span class="p">)</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">({</span><span class="w"></span>
+<span class="w">            </span><span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">fmt</span><span class="o">::</span><span class="n">Write</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">writer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cp">$crate</span><span class="o">::</span><span class="n">vga_buffer</span><span class="o">::</span><span class="n">WRITER</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span><span class="w"></span>
+<span class="w">            </span><span class="n">writer</span><span class="p">.</span><span class="n">write_fmt</span><span class="p">(</span><span class="n">format_args</span><span class="o">!</span><span class="p">(</span><span class="cp">$($arg</span><span class="p">)</span><span class="o">*</span><span class="p">)).</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">});</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Instead of a <code>_print</code> function, we call the <code>write_fmt</code> method of our static <code>Writer</code>. Since we&rsquo;re using a method from the <code>Write</code> trait, we need to import it before. The additional <code>unwrap()</code> at the end panics if printing isn&rsquo;t successful. But since we always return <code>Ok</code> in <code>write_str</code>, that should not happen.</p>
+
+<p>Note the additional <code>{}</code> scope around the macro: I wrote <code>=&gt; ({…})</code> instead of <code>=&gt; (…)</code>. The additional <code>{}</code> avoids that the <code>Write</code> trait is silently imported when <code>print</code> is used.</p>
+
+<h3 id="clearing-the-screen">Clearing the screen</h3>
+
+<p>We can now use <code>println!</code> to add a rather trivial function to clear the screen:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/vga_buffer.rs</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">clear_screen</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mi">0</span><span class="p">..</span><span class="n">BUFFER_HEIGHT</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<h3 id="hello-world-using-println">Hello World using <code>println</code></h3>
+
+<p>To use <code>println</code> in <code>lib.rs</code>, we need to import the macros of the VGA buffer module first. Therefore we add a <code>#[macro_use]</code> attribute to the module declaration:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+
+<span class="cp">#[macro_use]</span><span class="w"></span>
+<span class="kn">mod</span><span class="w"> </span><span class="n">vga_buffer</span><span class="p">;</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// ATTENTION: we have a very small stack and no guard page</span>
+<span class="w">    </span><span class="n">vga_buffer</span><span class="o">::</span><span class="n">clear_screen</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Hello World{}&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;!&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">loop</span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Since we imported the macros at crate level, they are available in all modules and thus provide an easy and safe interface to the VGA buffer.</p>
+
+<h2 id="what-s-next">What&rsquo;s next?</h2>
+
+<p>In the next posts we will map the kernel pages correctly so that accessing <code>0x0</code> or writing to <code>.rodata</code> is not possible anymore. To obtain the loaded kernel sections we will read the Multiboot information structure. Then we will create a paging module and use it to switch to a new page table where the kernel sections are mapped correctly.</p>
+
+<p>The <a href="/allocating-frames.html">next post</a> describes the Multiboot information structure and creates a frame allocator using the information about memory areas.</p>
+
+<h2 id="other-rust-os-projects">Other Rust OS Projects</h2>
+
+<p>Now that you know the very basics of OS development in Rust, you should also check out the following projects:</p>
+
+<ul>
+<li><p><a href="https://github.com/thepowersgang/rust-barebones-kernel">Rust Bare-Bones Kernel</a>: A basic kernel with roughly the same functionality as ours. Writes output to the serial port instead of the VGA buffer and maps the kernel to the <a href="http://wiki.osdev.org/Higher_Half_Kernel">higher half</a> (instead of our identity mapping).
+<em>Note</em>: You need to <a href="/cross-compile-binutils.html">cross compile binutils</a> to build it (or you create some symbolic links<sup class="footnote-ref" id="fnref:fn-symlink"><a rel="footnote" href="#fn:fn-symlink">1</a></sup> if you&rsquo;re on x86_64).</p></li>
+
+<li><p><a href="https://github.com/RustOS-Fork-Holding-Ground/RustOS">RustOS</a>: More advanced kernel that supports allocation, keyboard inputs, and threads. It also has a scheduler and a basic network driver.</p></li>
+
+<li><p><a href="https://github.com/thepowersgang/rust_os">&ldquo;Tifflin&rdquo; Experimental Kernel</a>: Big kernel project by thepowersgang, that is actively developed and has over 650 commits. It has a separate userspace and supports multiple file systems, even a GUI is included. Needs a cross compiler.</p></li>
+
+<li><p><a href="https://github.com/redox-os/redox">Redox</a>: Probably the most complete Rust OS today. It has an active community and over 1000 Github stars. File systems, network, an audio player, a picture viewer, and much more. Just take a look at the <a href="https://github.com/redox-os/redox#what-it-looks-like">screenshots</a>.</p></li>
+</ul>
+<div class="footnotes">
+
+<hr />
+
+<ol>
+<li id="fn:fn-symlink">You will need to symlink <code>x86_64-none_elf-XXX</code> to <code>/usr/bin/XXX</code> where <code>XXX</code> is in {<code>as</code>, <code>ld</code>, <code>objcopy</code>, <code>objdump</code>, <code>strip</code>}. The <code>x86_64-none_elf-XXX</code> files must be in some folder that is in your <code>$PATH</code>. But then you can only build for your x86_64 host architecture, so use this hack only for testing.
+ <a class="footnote-return" href="#fnref:fn-symlink"><sup>[return]</sup></a></li>
+</ol>
+</div>
+
+</article>
+
+<hr>
+<div class="PageNavigation">
+  
+    <a class="prev" href="/set-up-rust.html">&laquo; Set Up Rust</a>
+  
+  
+    <a class="next" href="/allocating-frames.html">Allocating Frames &raquo;</a>
+  
+</div>
+<hr>
+
+<div id="disqus_thread"></div>
+<script>
+  (function() {
+    
+    
+    if (window.location.hostname == "localhost")
+        return;
+
+    var d = document, s = d.createElement('script');
+
+    s.src = '//phil-opp.disqus.com/embed.js';
+
+    s.setAttribute('data-timestamp', +new Date());
+    (d.head || d.body).appendChild(s);
+  })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript" rel="nofollow">comments powered by Disqus.</a></noscript>
+
+</main>
+
+<footer class="footer">
+  <small>
+    &copy;
+    <time datetime="2016">2016</time>. All rights reserved.
+    <a href="/contact.html">Contact</a>
+  </small>
+</footer>
+</div>
+
+</body>
+</html>
+

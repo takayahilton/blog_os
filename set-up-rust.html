@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <meta http-equiv="X-Frame-Options" content="sameorigin">
+  
+  
+
+  <title>
+    Set Up Rust &middot; Writing an OS in Rust
+  </title>
+
+  <link rel="canonical" href="http://os.phil-opp.com/set-up-rust.html">
+
+  
+  <link rel="stylesheet" href="/css/poole.css">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/syntax.css">
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/images/apple-touch-icon-precomposed.png">
+  <link rel="shortcut icon" href="/images/favicon.ico">
+
+  
+
+  <script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-65296949-1', 'auto');
+  ga('send', 'pageview');
+
+</script>
+
+</head>
+
+<body>
+<div class="container content">
+
+<header class="masthead">
+  <h3 class="masthead-title">
+    <a href="/" title="Home">Writing an OS in Rust</a>
+    <span class="navigation">
+      <small><a href="/atom.xml"><img src="/images/feed-icon.png" alt="RSS"></a></small>
+    </span>
+    <small>Philipp&nbsp;Oppermann's&nbsp;blog</small>
+  </h3>
+</header>
+
+<main>
+
+
+<article class="post">
+  <h1 class="post-title">Set Up Rust</h1>
+  <time datetime="2015-09-02" class="post-date">
+    Sep 2, 2015
+    
+  </time>
+
+  
+
+<p>In the previous posts we created a <a href="/multiboot-kernel.html">minimal Multiboot kernel</a> and <a href="/entering-longmode.html">switched to Long Mode</a>. Now we can finally switch to <a href="https://www.rust-lang.org/">Rust</a> code. Rust is a high-level language without runtime. It allows us to not link the standard library and write bare metal code. Unfortunately the setup is not quite hassle-free yet.</p>
+
+<p>This blog post tries to set up Rust step-by-step and point out the different problems. If you have any questions, problems, or suggestions please <a href="https://github.com/phil-opp/blog_os/issues">file an issue</a> or create a comment at the bottom. The code from this post is in a <a href="https://github.com/phil-opp/blog_os/tree/set_up_rust">Github repository</a>, too.</p>
+
+<h2 id="installing-rust">Installing Rust</h2>
+
+<p>We need a nightly compiler, as we will use many unstable features. To manage Rust installations I highly recommend brson&rsquo;s <a href="https://github.com/brson/multirust">multirust</a>. It allows you to install nightly, beta, and stable compilers side-by-side and makes it easy to update them. To use a nightly compiler for the current directory, you can run <code>multirust override nightly</code>.</p>
+
+<p>The code from this post (and all following) is <a href="https://travis-ci.org/phil-opp/blog_os">automatically tested</a> every day and should always work for the newest nightly. If it doesn&rsquo;t, please <a href="https://github.com/phil-opp/blog_os/issues">file an issue</a>.</p>
+
+<h2 id="creating-a-cargo-project">Creating a Cargo project</h2>
+
+<p><a href="http://doc.crates.io/guide.html">Cargo</a> is Rust excellent package manager. Normally you would call <code>cargo new</code> when you want to create a new project folder. We can&rsquo;t use it because our folder already exists, so we need to do it manually. Fortunately we only need to add a cargo configuration file named <code>Cargo.toml</code>:</p>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="p">[</span><span class="n">package</span><span class="p">]</span>
+<span class="n">name</span> <span class="o">=</span> <span class="s">&quot;blog_os&quot;</span>
+<span class="n">version</span> <span class="o">=</span> <span class="s">&quot;0.1.0&quot;</span>
+<span class="n">authors</span> <span class="o">=</span> <span class="p">[</span><span class="s">&quot;Philipp Oppermann &lt;dev@phil-opp.com&gt;&quot;</span><span class="p">]</span>
+
+<span class="p">[</span><span class="n">lib</span><span class="p">]</span>
+<span class="n">crate-type</span> <span class="o">=</span> <span class="p">[</span><span class="s">&quot;staticlib&quot;</span><span class="p">]</span>
+</code></pre></div>
+
+<p>The <code>package</code> section contains required project metadata such as the <a href="http://doc.crates.io/manifest.html#the-package-section">semantic crate version</a>. The <code>lib</code> section specifies that we want to build a static library, i.e. a library that contains all of its dependencies. This is required to link the Rust project with our kernel.</p>
+
+<p>Now we place our root source file in <code>src/lib.rs</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#![feature(lang_items)]</span><span class="w"></span>
+<span class="cp">#![no_std]</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="cp">#[lang = </span><span class="s">&quot;eh_personality&quot;</span><span class="cp">]</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">eh_personality</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="cp">#[lang = </span><span class="s">&quot;panic_fmt&quot;</span><span class="cp">]</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">panic_fmt</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="k">loop</span><span class="p">{}}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Let&rsquo;s break it down:</p>
+
+<ul>
+<li><code>#!</code> defines an <a href="https://doc.rust-lang.org/book/attributes.html">attribute</a> of the current module. Since we are at the root module, they apply to the crate itself.</li>
+<li>The <code>feature</code> attribute is used to allow the specified <em>feature-gated</em> attributes in this crate. You can&rsquo;t do that in a stable/beta compiler, so this is one reason we need a Rust nighly.</li>
+<li>The <code>no_std</code> attribute prevents the automatic linking of the standard library. We can&rsquo;t use <code>std</code> because it relies on operating system features like files, system calls, and various device drivers. Remember that currently the only “feature” of our OS is printing <code>OKAY</code> :).</li>
+<li>A <code>#</code> without a <code>!</code> afterwards defines an attribute for the <em>following</em> item (a function in our case).</li>
+<li>The <code>no_mangle</code> attribute disables the automatic <a href="https://en.wikipedia.org/wiki/Name_mangling">name mangling</a> that Rust uses to get unique function names. We want to do a <code>call rust_main</code> from our assembly code, so this function name must stay as it is.</li>
+<li>We mark our main function as <code>extern</code> to make it compatible to the standard C <a href="https://en.wikipedia.org/wiki/Calling_convention">calling convention</a>.</li>
+<li>The <code>lang</code> attribute defines a Rust <a href="https://doc.rust-lang.org/book/lang-items.html">language item</a>.</li>
+<li>The <code>eh_personality</code> function is used for Rust&rsquo;s <a href="https://doc.rust-lang.org/std/rt/unwind/">unwinding</a> on <code>panic!</code>. We can leave it empty since we don&rsquo;t have any unwinding support in our OS yet.</li>
+<li>The <code>panic_fmt</code> function is the entry point on panic. Right now we can&rsquo;t do anything useful, so we just make sure that it doesn&rsquo;t return (required by the <code>!</code> return type).</li>
+</ul>
+
+<h2 id="building-rust">Building Rust</h2>
+
+<p>We can now build it using <code>cargo build</code>. To make sure, we are building it for the x86_64 architecture, we can pass an explicit target:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span></span>cargo build --target<span class="o">=</span>x86_64-unknown-linux-gnu
+</code></pre></div>
+
+<p>It creates a static library at <code>target/x86_64-unknown-linux-gnu/debug/libblog_os.a</code>, which can be linked with our assembly kernel. If you&rsquo;re getting an error about a missing <code>core</code> crate, <a href="/cross-compile-libcore.html">look here</a>.</p>
+
+<p>To build and link the rust library on <code>make</code>, we extend our <code>Makefile</code>(<a href="https://github.com/phil-opp/blog_os/blob/set_up_rust/Makefile">full file</a>):</p>
+<div class="highlight"><pre><code class="language-make" data-lang="make"><span></span><span class="c"># ...</span>
+<span class="nv">target</span> <span class="o">?=</span> <span class="k">$(</span>arch<span class="k">)</span>-unknown-linux-gnu
+<span class="nv">rust_os</span> <span class="o">:=</span> target/<span class="k">$(</span>target<span class="k">)</span>/debug/libblog_os.a
+<span class="c"># ...</span>
+<span class="nf">$(kernel)</span><span class="o">:</span> <span class="n">cargo</span> <span class="k">$(</span><span class="nv">rust_os</span><span class="k">)</span> <span class="k">$(</span><span class="nv">assembly_object_files</span><span class="k">)</span> <span class="k">$(</span><span class="nv">linker_script</span><span class="k">)</span>
+	@ld -n -T <span class="k">$(</span>linker_script<span class="k">)</span> -o <span class="k">$(</span>kernel<span class="k">)</span> <span class="se">\</span>
+		<span class="k">$(</span>assembly_object_files<span class="k">)</span> <span class="k">$(</span>rust_os<span class="k">)</span>
+
+<span class="nf">cargo</span><span class="o">:</span>
+       @cargo build --target <span class="k">$(</span>target<span class="k">)</span>
+</code></pre></div>
+
+<p>We added a new <code>cargo</code> target that just executes <code>cargo build</code> and modified the <code>$(kernel)</code> target to link the created static lib .</p>
+
+<p>But now <code>cargo build</code> is executed on every <code>make</code>, even if no source file was changed. And the ISO is recreated on every <code>make iso</code>/<code>make run</code>, too. We could try to avoid this by adding dependencies on all rust source and cargo configuration files to the <code>cargo</code> target, but the ISO creation takes only half a second on my machine and most of the time we will have changed a Rust file when we run <code>make</code>. So we keep it simple for now and let cargo do the bookkeeping of changed files (it does it anyway).</p>
+
+<h2 id="calling-rust">Calling Rust</h2>
+
+<p>Now we can call the main method in <code>long_mode_start</code>:</p>
+<div class="highlight"><pre><code class="language-nasm" data-lang="nasm"><span></span><span class="k">bits</span> <span class="mi">64</span>
+<span class="nl">long_mode_start:</span>
+    <span class="c1">; call the rust main</span>
+    <span class="k">extern</span> <span class="nv">rust_main</span>     <span class="c1">; new</span>
+    <span class="nf">call</span> <span class="nv">rust_main</span>       <span class="c1">; new</span>
+
+    <span class="c1">; print `OKAY` to screen</span>
+    <span class="nf">mov</span> <span class="nb">rax</span><span class="p">,</span> <span class="mh">0x2f592f412f4b2f4f</span>
+    <span class="nf">mov</span> <span class="kt">qword</span> <span class="p">[</span><span class="mh">0xb8000</span><span class="p">],</span> <span class="nb">rax</span>
+    <span class="nf">hlt</span>
+</code></pre></div>
+
+<p>By defining <code>rust_main</code> as <code>extern</code> we tell nasm that the function is defined in another file. As the linker takes care of linking them together, we&rsquo;ll get a linker error if we have a typo in the name or forget to mark the rust function as <code>pub extern</code>.</p>
+
+<p>If we&rsquo;ve done everything right, we should still see the green <code>OKAY</code> when executing <code>make run</code>. That means that we successfully called the Rust function and returned back to assembly.</p>
+
+<h2 id="fixing-linker-errors">Fixing Linker Errors</h2>
+
+<p>Now we can try some Rust code:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s">&quot;Hello&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot; &quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;World&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;!&quot;</span><span class="p">];</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>When we test it using <code>make run</code>, it fails with <code>undefined reference to 'memcpy'</code>. The <code>memcpy</code> function is one of the basic functions of the C library (<code>libc</code>). Usually the <code>libc</code> crate is linked to every Rust program together with the standard library, but we opted out through <code>#![no_std]</code>. We could try to fix this by adding the <a href="https://doc.rust-lang.org/nightly/libc/index.html">libc crate</a> as <code>extern crate</code>. But <code>libc</code> is just a wrapper for the system <code>libc</code>, for example <code>glibc</code> on Linux, so this won&rsquo;t work for us. Instead we need to recreate the basic <code>libc</code> functions such as <code>memcpy</code>, <code>memmove</code>, <code>memset</code>, and <code>memcmp</code> in Rust.</p>
+
+<h3 id="rlibc">rlibc</h3>
+
+<p>Fortunately there already is a crate for that: <a href="https://crates.io/crates/rlibc">rlibc</a>. When we look at its <a href="https://github.com/rust-lang/rlibc/blob/master/src/lib.rs">source code</a> we see that it contains no magic, just some <a href="https://doc.rust-lang.org/book/raw-pointers.html">raw pointer</a> operations in a while loop. To add <code>rlibc</code> as a dependency we just need to add two lines to the <code>Cargo.toml</code>:</p>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="p">...</span>
+<span class="p">[</span><span class="n">dependencies</span><span class="p">]</span>
+<span class="n">rlibc</span> <span class="o">=</span> <span class="s">&quot;0.1.4&quot;</span>
+</code></pre></div>
+
+<p>and an <code>extern crate</code> definition in our <code>src/lib.rs</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="p">...</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">rlibc</span><span class="p">;</span><span class="w"></span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="p">...</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now <code>make run</code> doesn&rsquo;t complain about <code>memcpy</code> anymore. Instead it will show a pile of new errors:</p>
+<div class="highlight"><pre><span></span>target/debug/libblog_os.a(core-35017696.0.o):
+    In function `ops::f32.Rem::rem::hfcbbcbe5711a6e6emxm&#39;:
+    core.0.rs:(.text._ZN3ops7f32.Rem3rem20hfcbbcbe5711a6e6emxmE+0x1):
+    undefined reference to `fmodf&#39;
+target/debug/libblog_os.a(core-35017696.0.o):
+    In function `ops::f64.Rem::rem::hbf225030671c7a35Txm&#39;:
+    core.0.rs:(.text._ZN3ops7f64.Rem3rem20hbf225030671c7a35TxmE+0x1):
+    undefined reference to `fmod&#39;
+...
+</pre></div>
+
+<h3 id="gc-sections">&ndash;gc-sections</h3>
+
+<p>The new errors are linker errors about missing <code>fmod</code> and <code>fmodf</code> functions. These functions are used for the modulo operation (<code>%</code>) on floating point numbers in <a href="https://doc.rust-lang.org/core/">libcore</a>. The core library is added implicitly when using <code>#![no_std]</code> and provides basic standard library features like <code>Option</code> or <code>Iterator</code>. According to the documentation it is “dependency-free”. But it actually has some dependencies, for example on <code>fmod</code> and <code>fmodf</code>.</p>
+
+<p>So how do we fix this problem? We don&rsquo;t use any floating point operations, so we could just provide our own implementations of <code>fmod</code> and <code>fmodf</code> that just do a <code>loop{}</code>. But there&rsquo;s a better way that doesn&rsquo;t fail silently when we use float modulo some day: We tell the linker to remove unused sections. That&rsquo;s generally a good idea as it reduces kernel size. And we don&rsquo;t have any references to <code>fmod</code> and <code>fmodf</code> anymore until we use floating point modulo. The magic linker flag is <code>--gc-sections</code>, which stands for “garbage collect sections”. Let&rsquo;s add it to the <code>$(kernel)</code> target in our <code>Makefile</code>:</p>
+<div class="highlight"><pre><code class="language-make" data-lang="make"><span></span><span class="nf">$(kernel)</span><span class="o">:</span> <span class="n">cargo</span> <span class="k">$(</span><span class="nv">rust_os</span><span class="k">)</span> <span class="k">$(</span><span class="nv">assembly_object_files</span><span class="k">)</span> <span class="k">$(</span><span class="nv">linker_script</span><span class="k">)</span>
+	@ld -n --gc-sections -T <span class="k">$(</span>linker_script<span class="k">)</span> -o <span class="k">$(</span>kernel<span class="k">)</span> <span class="se">\</span>
+		<span class="k">$(</span>assembly_object_files<span class="k">)</span> <span class="k">$(</span>rust_os<span class="k">)</span>
+</code></pre></div>
+
+<p>Now we can do a <code>make run</code> again and… it doesn&rsquo;t boot anymore:</p>
+<div class="highlight"><pre><span></span>GRUB error: no multiboot header found.
+</pre></div>
+
+<p>What happened? Well, the linker removed unused sections. And since we don&rsquo;t use the Multiboot section anywhere, <code>ld</code> removes it, too. So we need to tell the linker explicitely that it should keep this section. The <code>KEEP</code> command does exactly that, so we add it to the linker script (<code>linker.ld</code>):</p>
+<div class="highlight"><pre><span></span><span class="na">.boot</span> <span class="p">:</span>
+<span class="err">{</span>
+    <span class="err">/*</span> <span class="nf">ensure</span> <span class="no">that</span> <span class="no">the</span> <span class="no">multiboot</span> <span class="no">header</span> <span class="no">is</span> <span class="no">at</span> <span class="no">the</span> <span class="no">beginning</span> <span class="p">*</span><span class="err">/</span>
+    <span class="nf">KEEP</span><span class="p">(*(.</span><span class="no">multiboot_header</span><span class="p">))</span>
+<span class="err">}</span>
+</pre></div>
+
+<p>Now everything should work again (the green <code>OKAY</code>). But there is another linking issue, which is triggered by some other example code.</p>
+
+<h3 id="no-landing-pads">no-landing-pads</h3>
+
+<p>The following snippet still fails:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="w">    </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="mi">0</span><span class="p">..</span><span class="mi">3</span><span class="p">).</span><span class="n">flat_map</span><span class="p">(</span><span class="o">|</span><span class="n">x</span><span class="o">|</span><span class="w"> </span><span class="mi">0</span><span class="p">..</span><span class="n">x</span><span class="p">).</span><span class="n">zip</span><span class="p">(</span><span class="mi">0</span><span class="p">..);</span><span class="w"></span>
+</code></pre></div>
+
+<p>The error is a linker error again (hence the ugly error message):</p>
+<div class="highlight"><pre><span></span>target/debug/libblog_os.a(blog_os.0.o):
+    In function `blog_os::iter::Iterator::zip&lt;core::iter::FlatMap&lt;
+        core::ops::Range&lt;i32&gt;, core::ops::Range&lt;i32&gt;, closure&gt;,
+        core::ops::RangeFrom&lt;i32&gt;&gt;&#39;:
+    /home/.../src/libcore/iter.rs:654:
+    undefined reference to `_Unwind_Resume&#39;
+</pre></div>
+
+<p>So the linker can&rsquo;t find a function named <code>_Unwind_Resume</code> that is referenced in <code>iter.rs:654</code> in libcore. This reference is not really there at <a href="https://github.com/rust-lang/rust/blob/b0ca03923359afc8df92a802b7cc1476a72fb2d0/src/libcore/iter.rs#L654">line 654 of libcore&rsquo;s <code>iter.rs</code></a>. Instead, it is a compiler inserted <em>landing pad</em>, which is used for exception handling.</p>
+
+<p>The easiest way of fixing this problem is to disable the landing pad creation since we don&rsquo;t supports panics anyway right now. We can do this by passing a <code>-Z no-landing-pads</code> flag to <code>rustc</code> (the actual Rust compiler below cargo). To do this we replace the <code>cargo build</code> command in our Makefile with the <code>cargo rustc</code> command, which does the same but allows passing flags to <code>rustc</code>:</p>
+<div class="highlight"><pre><code class="language-make" data-lang="make"><span></span><span class="nf">cargo</span><span class="o">:</span>
+	@cargo rustc --target <span class="k">$(</span>target<span class="k">)</span> -- -Z no-landing-pads
+</code></pre></div>
+
+<p>Now we fixed all linking issues.</p>
+
+<p>(For completeness, there is another flag you should pass to <code>rustc</code> as soon as you enable interrupts: <code>-C no-redzone</code>. For more information see the <a href="https://github.com/phil-opp/blog_os/issues/10">Github issue</a>).</p>
+
+<h2 id="the-final-problem">The final problem</h2>
+
+<p>Unfortunately there is one last problem left, that gets triggered by the following code:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="s">&quot;hello&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">42</span><span class="p">);</span><span class="w"></span>
+<span class="n">a</span><span class="p">.</span><span class="mi">1</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>When we add that code to <code>rust_main</code> and test it using <code>make run</code>, the OS will constantly reboot itself. Let&rsquo;s try to debug it.</p>
+
+<h3 id="debugging">Debugging</h3>
+
+<p>Such a boot loop is most likely caused by some <a href="http://wiki.osdev.org/Exceptions">CPU exception</a>. When these exceptions aren&rsquo;t handled, a <a href="http://wiki.osdev.org/Triple_Fault">Triple Fault</a> occurs and the processor resets itself. We can look at generated CPU interrupts/exceptions using QEMU:</p>
+<div class="highlight"><pre><span></span>&gt; qemu-system-x86_64 -d int -no-reboot -cdrom build/os-x86_64.iso
+SMM: enter
+...
+SMM: after RSM
+...
+check_exception old: 0xffffffff new 0x6
+     0: v=06 e=0000 i=0 cpl=0 IP=0008:00000000001001d3 pc=00000000001001d3
+     SP=0010:0000000000102ff0 env-&gt;regs[R_EAX]=000000000000002a
+...
+check_exception old: 0xffffffff new 0xd
+     1: v=0d e=0062 i=0 cpl=0 IP=0008:00000000001001d3 pc=00000000001001d3
+     SP=0010:0000000000102ff0 env-&gt;regs[R_EAX]=000000000000002a
+...
+check_exception old: 0xd new 0xd
+     2: v=08 e=0000 i=0 cpl=0 IP=0008:00000000001001d3 pc=00000000001001d3
+     SP=0010:0000000000102ff0 env-&gt;regs[R_EAX]=000000000000002a
+...
+check_exception old: 0x8 new 0xd
+</pre></div>
+
+<p>Let me first explain the QEMU arguments: The <code>-d int</code> logs CPU interrupts to the console and the <code>-no-reboot</code> flag closes QEMU instead of constant rebooting. But what does the cryptical output mean? I already omitted most of it as we don&rsquo;t need it here. Let&rsquo;s break down the rest:</p>
+
+<ul>
+<li>The first two blocks, <code>SMM: enter</code> and <code>SMM: after RSM</code> are created before our OS boots, so we just ignore them.</li>
+<li>The next block, <code>check_exception old: 0xffffffff new 0x6</code> is the interesting one. It says: “a new CPU exception with number <code>0x6</code> occurred“.</li>
+<li>The last blocks indicate further exceptions. They were thrown because we didn&rsquo;t handle the <code>0x6</code> exception, so we&rsquo;re going to ignore them, too.</li>
+</ul>
+
+<p>So let&rsquo;s look at the first exception: <code>old:0xffffffff</code> means that the CPU wasn&rsquo;t handling an interrupt when the exception occurred. The new exception has number <code>0x6</code>. By looking at an <a href="http://wiki.osdev.org/Exceptions">exception table</a> we learn that <code>0x6</code> indicates a <a href="http://wiki.osdev.org/Exceptions#Invalid_Opcode">Invalid Opcode</a> fault. So the lastly executed instruction was invalid. The register dump tells us that the current instruction was <code>0x1001d3</code> (through <code>IP</code>  (instruction pointer) or <code>pc</code> (program counter)). Therefore the instruction at <code>0x1001d3</code> seems to be invalid. We can look at it using <code>objdump</code>:</p>
+<div class="highlight"><pre><span></span>&gt; objdump -D build/kernel-x86_64.bin | grep &quot;1001d3:&quot;
+1001d3:	0f 10 05 16 01 00 00 	movups 0x116(%rip),%xmm0 ...
+</pre></div>
+
+<p>Through <code>objdump -D</code> we disassemble our whole kernel and <code>grep</code> picks the relevant line. The instruction at <code>0x1001d3</code> seems to be a valid <code>movaps</code> instruction. It&rsquo;s a <a href="https://en.wikipedia.org/wiki/Streaming_SIMD_Extensions">SSE</a> instruction that moves 128 bit between memory and SSE-registers (e.g. <code>xmm0</code>). But why the <code>Invalid Opcode</code> exception? The answer is hidden behind the <a href="http://www.c3se.chalmers.se/Common/VTUNE-9.1/doc/users_guide/mergedProjects/analyzer_ec/mergedProjects/reference_olh/mergedProjects/instructions/instruct32_hh/vc181.htm">movaps documentation</a>: The section <em>Protected Mode Exceptions</em> lists the conditions for the various exceptions. The short code of the <code>Invalid Opcode</code> is <code>#UD</code>. An <code>#UD</code> exception occurs:</p>
+
+<blockquote>
+<p>For an unmasked Streaming SIMD Extensions 2 instructions numeric exception (CR4.OSXMMEXCPT =0). If EM in CR0 is set. If OSFXSR in CR4 is 0. If CPUID feature flag SSE2 is 0.</p>
+</blockquote>
+
+<p>The rough translation of this cryptic definition is: <em>If SSE isn&rsquo;t enabled</em>. So apparently Rust uses SSE instructions by default and we didn&rsquo;t enable SSE before. To fix this, we can either disable SSE instructions in the compiler or enable SSE in our kernel. We do the latter, as it&rsquo;s easier.</p>
+
+<h3 id="enabling-sse">Enabling SSE</h3>
+
+<p>To enable SSE, assembly code is needed again. We want to add a function that tests if SSE is available and enables it then. Else we want to print an error message.</p>
+
+<p>We add it to the <code>boot.asm</code> file:</p>
+<div class="highlight"><pre><code class="language-nasm" data-lang="nasm"><span></span><span class="c1">; Check for SSE and enable it. If it&#39;s not supported throw error &quot;a&quot;.</span>
+<span class="nl">set_up_SSE:</span>
+    <span class="c1">; check for SSE</span>
+    <span class="nf">mov</span> <span class="nb">eax</span><span class="p">,</span> <span class="mh">0x1</span>
+    <span class="k">cpu</span><span class="nv">id</span>
+    <span class="nf">test</span> <span class="nb">edx</span><span class="p">,</span> <span class="mi">1</span><span class="o">&lt;&lt;</span><span class="mi">25</span>
+    <span class="nf">jz</span> <span class="nv">.no_SSE</span>
+
+    <span class="c1">; enable SSE</span>
+    <span class="nf">mov</span> <span class="nb">eax</span><span class="p">,</span> <span class="nb">cr0</span>
+    <span class="nf">and</span> <span class="nb">ax</span><span class="p">,</span> <span class="mh">0xFFFB</span>      <span class="c1">; clear coprocessor emulation CR0.EM</span>
+    <span class="nf">or</span> <span class="nb">ax</span><span class="p">,</span> <span class="mh">0x2</span>          <span class="c1">; set coprocessor monitoring  CR0.MP</span>
+    <span class="nf">mov</span> <span class="nb">cr0</span><span class="p">,</span> <span class="nb">eax</span>
+    <span class="nf">mov</span> <span class="nb">eax</span><span class="p">,</span> <span class="nb">cr4</span>
+    <span class="nf">or</span> <span class="nb">ax</span><span class="p">,</span> <span class="mi">3</span> <span class="o">&lt;&lt;</span> <span class="mi">9</span>       <span class="c1">; set CR4.OSFXSR and CR4.OSXMMEXCPT at the same time</span>
+    <span class="nf">mov</span> <span class="nb">cr4</span><span class="p">,</span> <span class="nb">eax</span>
+
+    <span class="nf">ret</span>
+<span class="nl">.no_SSE:</span>
+    <span class="nf">mov</span> <span class="nb">al</span><span class="p">,</span> <span class="s">&quot;a&quot;</span>
+    <span class="nf">jmp</span> <span class="nv">error</span>
+</code></pre></div>
+
+<p>The code is from the great <a href="http://wiki.osdev.org/SSE#Checking_for_SSE">OSDev Wiki</a> again. Notice that it sets/unsets exactly the bits that can cause the <code>Invalid Opcode</code> exception.</p>
+
+<p>When we insert a <code>call set_up_SSE</code> somewhere in the <code>start</code> function (for example after <code>call enable_paging</code>), our Rust code will finally work.</p>
+
+<h3 id="os-returned">“OS returned!”</h3>
+
+<p>Now that we&rsquo;re editing assembly anyway, we should change the <code>OKAY</code> message to something more meaningful. My suggestion is a red <code>OS returned!</code>:</p>
+<div class="highlight"><pre><code class="language-nasm" data-lang="nasm"><span></span><span class="nf">...</span>
+<span class="nf">call</span> <span class="nv">rust_main</span>
+
+<span class="nl">.os_returned:</span>
+    <span class="c1">; rust main returned, print `OS returned!`</span>
+    <span class="nf">mov</span> <span class="nb">rax</span><span class="p">,</span> <span class="mh">0x4f724f204f534f4f</span>
+    <span class="nf">mov</span> <span class="p">[</span><span class="mh">0xb8000</span><span class="p">],</span> <span class="nb">rax</span>
+    <span class="nf">mov</span> <span class="nb">rax</span><span class="p">,</span> <span class="mh">0x4f724f754f744f65</span>
+    <span class="nf">mov</span> <span class="p">[</span><span class="mh">0xb8008</span><span class="p">],</span> <span class="nb">rax</span>
+    <span class="nf">mov</span> <span class="nb">rax</span><span class="p">,</span> <span class="mh">0x4f214f644f654f6e</span>
+    <span class="nf">mov</span> <span class="p">[</span><span class="mh">0xb8010</span><span class="p">],</span> <span class="nb">rax</span>
+    <span class="nf">hlt</span>
+</code></pre></div>
+
+<p>Ok, that&rsquo;s enough assembly for now. Let&rsquo;s switch back to Rust.</p>
+
+<h2 id="hello-world">Hello World!</h2>
+
+<p>Finally, it&rsquo;s time for a <code>Hello World!</code> from Rust:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// ATTENTION: we have a very small stack and no guard page</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">hello</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">b&quot;Hello World!&quot;</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">color_byte</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0x1f</span><span class="p">;</span><span class="w"> </span><span class="c1">// white foreground, blue background</span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">hello_colored</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">color_byte</span><span class="p">;</span><span class="w"> </span><span class="mi">24</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="n">char_byte</span><span class="p">)</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">hello</span><span class="p">.</span><span class="n">into_iter</span><span class="p">().</span><span class="n">enumerate</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">hello_colored</span><span class="p">[</span><span class="n">i</span><span class="o">*</span><span class="mi">2</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">char_byte</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// write `Hello World!` to the center of the VGA text buffer</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">buffer_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="mh">0xb8000</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1988</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="n">buffer_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">hello_colored</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">loop</span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Some notes:</p>
+
+<ul>
+<li>The <code>b</code> prefix creates a <a href="https://doc.rust-lang.org/reference.html#characters-and-strings">byte string</a>, which is just an array of <code>u8</code></li>
+<li><a href="https://doc.rust-lang.org/nightly/core/iter/trait.Iterator.html#method.enumerate">enumerate</a> is an <code>Iterator</code> method that adds the current index <code>i</code> to elements</li>
+<li><code>buffer_ptr</code> is a <a href="https://doc.rust-lang.org/book/raw-pointers.html">raw pointer</a> that points to the center of the VGA text buffer</li>
+<li>Rust doesn&rsquo;t know the VGA buffer and thus can&rsquo;t guarantee that writing to the <code>buffer_ptr</code> is safe (it could point to important data). So we need to tell Rust that we know what we are doing by using an <a href="https://doc.rust-lang.org/book/unsafe.html">unsafe block</a>.</li>
+</ul>
+
+<h3 id="stack-overflows">Stack Overflows</h3>
+
+<p>Since we still use the small 64 byte <a href="/entering-longmode.html#creating-a-stack">stack from the last post</a>, we must be careful not to <a href="https://en.wikipedia.org/wiki/Stack_overflow">overflow</a> it. Normally, Rust tries to avoid stack overflows through <em>guard pages</em>: The page below the stack isn&rsquo;t mapped and such a stack overflow triggers a page fault (instead of silently overwriting random memory). But we can&rsquo;t unmap the page below our stack right now since we currently use only a single big page. Fortunately the stack is located just above the page tables. So some important page table entry would probably get overwritten on stack overflow and then a page fault occurs, too.</p>
+
+<h2 id="what-s-next">What&rsquo;s next?</h2>
+
+<p>Until now we write magic bits to some memory location when we want to print something to screen. In the <a href="/printing-to-screen.html">next post</a> we create a abstraction for the VGA text buffer that allows us to print strings in different colors and provides a simple interface.</p>
+
+</article>
+
+<hr>
+<div class="PageNavigation">
+  
+    <a class="prev" href="/entering-longmode.html">&laquo; Entering Long Mode</a>
+  
+  
+    <a class="next" href="/printing-to-screen.html">Printing to Screen &raquo;</a>
+  
+</div>
+<hr>
+
+<div id="disqus_thread"></div>
+<script>
+  (function() {
+    
+    
+    if (window.location.hostname == "localhost")
+        return;
+
+    var d = document, s = d.createElement('script');
+
+    s.src = '//phil-opp.disqus.com/embed.js';
+
+    s.setAttribute('data-timestamp', +new Date());
+    (d.head || d.body).appendChild(s);
+  })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript" rel="nofollow">comments powered by Disqus.</a></noscript>
+
+</main>
+
+<footer class="footer">
+  <small>
+    &copy;
+    <time datetime="2016">2016</time>. All rights reserved.
+    <a href="/contact.html">Contact</a>
+  </small>
+</footer>
+</div>
+
+</body>
+</html>
+

@@ -1,0 +1,1101 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <meta http-equiv="X-Frame-Options" content="sameorigin">
+  
+  
+
+  <title>
+    Page Tables &middot; Writing an OS in Rust
+  </title>
+
+  <link rel="canonical" href="http://os.phil-opp.com/modifying-page-tables.html">
+
+  
+  <link rel="stylesheet" href="/css/poole.css">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/syntax.css">
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/images/apple-touch-icon-precomposed.png">
+  <link rel="shortcut icon" href="/images/favicon.ico">
+
+  
+
+  <script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-65296949-1', 'auto');
+  ga('send', 'pageview');
+
+</script>
+
+</head>
+
+<body>
+<div class="container content">
+
+<header class="masthead">
+  <h3 class="masthead-title">
+    <a href="/" title="Home">Writing an OS in Rust</a>
+    <span class="navigation">
+      <small><a href="/atom.xml"><img src="/images/feed-icon.png" alt="RSS"></a></small>
+    </span>
+    <small>Philipp&nbsp;Oppermann's&nbsp;blog</small>
+  </h3>
+</header>
+
+<main>
+
+
+<article class="post">
+  <h1 class="post-title">Page Tables</h1>
+  <time datetime="2015-12-09" class="post-date">
+    Dec 9, 2015
+    
+  </time>
+
+  
+
+<p>In this post we will create a paging module, which allows us to access and modify the 4-level page table. We will explore recursive page table mapping and use some Rust features to make it safe. Finally we will create functions to translate virtual addresses and to map and unmap pages.</p>
+
+<p>You can find the source code and this post itself on <a href="https://github.com/phil-opp/blog_os/tree/page_tables">Github</a>. Please file an issue there if you have any problems or improvement suggestions. There is also a comment section at the end of this page. Note that this post requires a current Rust nightly.</p>
+
+<h2 id="paging">Paging</h2>
+
+<p><em>Paging</em> is a memory management scheme that separates virtual and physical memory. The address space is split into equal sized <em>pages</em> and <em>page tables</em> specify which virtual page points to which physical frame. For an extensive paging introduction take a look at the paging chapter (<a href="http://pages.cs.wisc.edu/~remzi/OSTEP/vm-paging.pdf">PDF</a>) of the <a href="http://pages.cs.wisc.edu/~remzi/OSTEP/">Three Easy Pieces</a> OS book.</p>
+
+<p>The x86 architecture uses a 4-level page table in 64-bit mode. A virtual address has the following structure:</p>
+
+<p><img src="/images/x86_address_structure.svg" alt="structure of a virtual address on x86" /></p>
+
+<p>The bits 48–63 are so-called <em>sign extension</em> bits and must be copies of bit 47. The following 36 bits define the page table indexes (9 bits per table) and the last 12 bits specify the offset in the 4KiB page.</p>
+
+<p>Each table has 2^9 = 512 entries and each entry is 8 byte. Thus a page table fits exactly in one page (4 KiB).</p>
+
+<p>To translate an address, the CPU reads the P4 address from the CR3 register. Then it uses the indexes to walk the tables:</p>
+
+<p><img src="/images/X86_Paging_64bit.svg" alt="translation of virtual to physical addresses in 64 bit mode" /></p>
+
+<p>The P4 entry points to a P3 table, where the next 9 bits of the address are used to select an entry. The P3 entry then points to a P2 table and the P2 entry points to a P1 table. The P1 entry, which is specified through bits 12–20, finally points to the physical frame.</p>
+
+<h2 id="a-basic-paging-module">A Basic Paging Module</h2>
+
+<p>Let&rsquo;s create a basic paging module in <code>memory/paging/mod.rs</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="n">PAGE_SIZE</span><span class="p">;</span><span class="w"> </span><span class="c1">// needed later</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">ENTRY_COUNT</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">512</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">type</span><span class="w"> </span><span class="n">PhysicalAddress</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">type</span><span class="w"> </span><span class="n">VirtualAddress</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Page</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">   </span><span class="n">number</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We import the <code>PAGE_SIZE</code> and define a constant for the number of entries per table. To make future function signatures more expressive, we can use the type aliases <code>PhysicalAddress</code> and <code>VirtualAddress</code>. The <code>Page</code> struct is similar to the <code>Frame</code> struct in the <a href="/allocating-frames.html#a-memory-module">previous post</a>, but represents a virtual page instead of a physical frame.</p>
+
+<h3 id="page-table-entries">Page Table Entries</h3>
+
+<p>To model page table entries, we create a new <code>entry</code> submodule:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="n">Frame</span><span class="p">;</span><span class="w"> </span><span class="c1">// needed later</span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Entry</span><span class="p">(</span><span class="kt">u64</span><span class="p">);</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Entry</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">is_unused</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">set_unused</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We define that an unused entry is completely 0. That allows us to distinguish unused entries from other non-present entries in the future. For example, we could define one of the available bits as the <code>swapped_out</code> bit for pages that are swapped to disk.</p>
+
+<p>Next we will model the contained physical address and the various flags. Remember, entries have the following format:</p>
+
+<table>
+<thead>
+<tr>
+<th>Bit(s)</th>
+<th>Name</th>
+<th>Meaning</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td>0</td>
+<td>present</td>
+<td>the page is currently in memory</td>
+</tr>
+
+<tr>
+<td>1</td>
+<td>writable</td>
+<td>it&rsquo;s allowed to write to this page</td>
+</tr>
+
+<tr>
+<td>2</td>
+<td>user accessible</td>
+<td>if not set, only kernel mode code can access this page</td>
+</tr>
+
+<tr>
+<td>3</td>
+<td>write through caching</td>
+<td>writes go directly to memory</td>
+</tr>
+
+<tr>
+<td>4</td>
+<td>disable cache</td>
+<td>no cache is used for this page</td>
+</tr>
+
+<tr>
+<td>5</td>
+<td>accessed</td>
+<td>the CPU sets this bit when this page is used</td>
+</tr>
+
+<tr>
+<td>6</td>
+<td>dirty</td>
+<td>the CPU sets this bit when a write to this page occurs</td>
+</tr>
+
+<tr>
+<td>7</td>
+<td>huge page/null</td>
+<td>must be 0 in P1 and P4, creates a 1GiB page in P3, creates a 2MiB page in P2</td>
+</tr>
+
+<tr>
+<td>8</td>
+<td>global</td>
+<td>page isn&rsquo;t flushed from caches on address space switch (PGE bit of CR4 register must be set)</td>
+</tr>
+
+<tr>
+<td>9-11</td>
+<td>available</td>
+<td>can be used freely by the OS</td>
+</tr>
+
+<tr>
+<td>12-51</td>
+<td>physical address</td>
+<td>the page aligned 52bit physical address of the frame or the next page table</td>
+</tr>
+
+<tr>
+<td>52-62</td>
+<td>available</td>
+<td>can be used freely by the OS</td>
+</tr>
+
+<tr>
+<td>63</td>
+<td>no execute</td>
+<td>forbid executing code on this page (the NXE bit in the EFER register must be set)</td>
+</tr>
+</tbody>
+</table>
+
+<p>To model the various flags, we will use the <a href="https://github.com/rust-lang-nursery/bitflags">bitflags</a> crate. To add it as a dependency, add the following to your <code>Cargo.toml</code>:</p>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="p">[</span><span class="n">dependencies</span><span class="p">.</span><span class="n">bitflags</span><span class="p">]</span>
+<span class="n">version</span> <span class="o">=</span> <span class="s">&quot;0.4.0&quot;</span>
+<span class="n">features</span> <span class="o">=</span> <span class="p">[</span><span class="s">&quot;no_std&quot;</span><span class="p">]</span>
+</code></pre></div>
+
+<p>The <code>no_std</code> feature is needed because <code>bitflags</code> depends on the standard library by default. But it has a <a href="http://doc.crates.io/manifest.html#the-[features]-section">cargo feature</a> to use the core library instead. It will become the default as soon as <code>no_std</code> is stable in a stable Rust release.</p>
+
+<p>To import the macro, we need to use <code>#[macro_use]</code> above the <code>extern crate</code> definition:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+<span class="cp">#[macro_use]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">bitflags</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we can model the various flags:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="n">bitflags</span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">flags</span><span class="w"> </span><span class="n">EntryFlags</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">PRESENT</span><span class="w"> </span><span class="o">=</span><span class="w">         </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">WRITABLE</span><span class="w"> </span><span class="o">=</span><span class="w">        </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">USER_ACCESSIBLE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">WRITE_THROUGH</span><span class="w"> </span><span class="o">=</span><span class="w">   </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">NO_CACHE</span><span class="w"> </span><span class="o">=</span><span class="w">        </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">ACCESSED</span><span class="w"> </span><span class="o">=</span><span class="w">        </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">DIRTY</span><span class="w"> </span><span class="o">=</span><span class="w">           </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">6</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">HUGE_PAGE</span><span class="w"> </span><span class="o">=</span><span class="w">       </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">GLOBAL</span><span class="w"> </span><span class="o">=</span><span class="w">          </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">NO_EXECUTE</span><span class="w"> </span><span class="o">=</span><span class="w">      </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">63</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>To extract the flags from the entry we create an <code>Entry::flags</code> method that uses <a href="https://doc.rust-lang.org/bitflags/bitflags/macro.bitflags!.html#methods">from_bits_truncate</a>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">flags</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">EntryFlags</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">EntryFlags</span><span class="o">::</span><span class="n">from_bits_truncate</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>This allows us to check for flags through the <code>contains()</code> function. For example, <code>flags().contains(PRESENT | WRITABLE)</code> returns true if the entry contains <em>both</em> flags.</p>
+
+<p>To extract the physical address, we add a <code>pointed_frame</code> method:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">pointed_frame</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Frame</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">flags</span><span class="p">().</span><span class="n">contains</span><span class="p">(</span><span class="n">PRESENT</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Some</span><span class="p">(</span><span class="n">Frame</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mh">0x000fffff_fffff000</span><span class="w"></span>
+<span class="w">        </span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">None</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>If the entry is present, we mask bits 12–51 and return the corresponding frame. If the entry is not present, it does not point to a valid frame so we return <code>None</code>.</p>
+
+<p>To modify entries, we add a <code>set</code> method that updates the flags and the pointed frame:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">set</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="o">:</span><span class="w"> </span><span class="n">EntryFlags</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">assert</span><span class="o">!</span><span class="p">(</span><span class="n">frame</span><span class="p">.</span><span class="n">start_address</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="o">!</span><span class="mh">0x000fffff_fffff000</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">frame</span><span class="p">.</span><span class="n">start_address</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">flags</span><span class="p">.</span><span class="n">bits</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The start address of a frame should be page aligned and smaller than 2^52 (since x86 uses 52bit physical addresses). Since an invalid address could mess up the entry, we add an assertion. To actually set the entry, we just need to <code>or</code> the start address and the flag bits.</p>
+
+<p>The missing <code>Frame::start_address</code> method is pretty simple:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">PhysicalAddress</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">start_address</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">PhysicalAddress</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">PAGE_SIZE</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We add it to the <code>impl Frame</code> block in <code>memory/mod.rs</code>.</p>
+
+<h3 id="page-tables">Page Tables</h3>
+
+<p>To model page tables, we create a basic <code>Table</code> struct in a new <code>table</code> submodule:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">entry</span><span class="o">::*</span><span class="p">;</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">ENTRY_COUNT</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Table</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">entries</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="n">Entry</span><span class="p">;</span><span class="w"> </span><span class="n">ENTRY_COUNT</span><span class="p">],</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>It&rsquo;s just an array of 512 page table entries.</p>
+
+<p>To make the <code>Table</code> indexable itself, we can implement the <code>Index</code> and <code>IndexMut</code> traits:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">ops</span><span class="o">::</span><span class="p">{</span><span class="n">Index</span><span class="p">,</span><span class="w"> </span><span class="n">IndexMut</span><span class="p">};</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Index</span><span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Table</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span><span class="w"> </span><span class="n">Output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Entry</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">index</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Entry</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">&amp;</span><span class="bp">self</span><span class="p">.</span><span class="n">entries</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">IndexMut</span><span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Table</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">index_mut</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Entry</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">entries</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now it&rsquo;s possible to get the 42th entry through <code>some_table[42]</code>. Of course we could replace <code>usize</code> with <code>u32</code> or even <code>u16</code> here but it would cause more numerical conversions (<code>x as u16</code>).</p>
+
+<p>Let&rsquo;s add a method that sets all entries to unused. We will need it when we create new page tables in the future. The method looks like this:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">zero</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">entry</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">entries</span><span class="p">.</span><span class="n">iter_mut</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">entry</span><span class="p">.</span><span class="n">set_unused</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we can read page tables and retrieve the mapping information. We can also update them through the <code>IndexMut</code> trait and the <code>Entry::set</code> method. But how do we get references to the various page tables?</p>
+
+<p>We could read the <code>CR3</code> register to get the physical address of the P4 table and read its entries to get the P3 addresses. The P3 entries then point to the P2 tables and so on. But this method only works for identity-mapped pages. In the future we will create new page tables, which aren&rsquo;t in the identity-mapped area anymore. Since we can&rsquo;t access them through their physical address, we need a way to map them to virtual addresses.</p>
+
+<h2 id="mapping-page-tables">Mapping Page Tables</h2>
+
+<p>So how do we map the page tables itself? We don&rsquo;t have that problem for the current P4, P3, and P2 table since they are part of the identity-mapped area, but we need a way to access future tables, too.</p>
+
+<p>One solution is to identity map all page tables. That way we would not need to differentiate virtual and physical addresses and could easily access the tables. But it clutters the virtual address space and increases fragmentation. And it makes creating page tables much more complicated since we need a physical frame whose corresponding page isn&rsquo;t already used for something else.</p>
+
+<p>An alternative solution is to map the page tables only temporary. To read/write a page table, we would map it to some free virtual address until we&rsquo;re done. We could use a small pool of such virtual addresses and reuse them for various tables. This method occupies only few virtual addresses and thus is a good solution for 32-bit systems, which have small address spaces. But it makes things much more complicated since we need to temporary map up to 4 tables to access a single page. And the temporary mapping requires modification of other page tables, which need to be mapped, too.</p>
+
+<p>We will solve the problem in another way using a trick called <em>recursive mapping</em>.</p>
+
+<h3 id="recursive-mapping">Recursive Mapping</h3>
+
+<p>The trick is to map the P4 table recursively: The last entry doesn&rsquo;t point to a P3 table, but to the P4 table itself. We can use this entry to remove a translation level so that we land on a page table instead. For example, we can “loop” once to access a P1 table:</p>
+
+<p><img src="/images/recursive_mapping_access_p1.svg" alt="access P1 table through recursive paging" /></p>
+
+<p>By selecting the 511th P4 entry, which points points to the P4 table itself, the P4 table is used as the P3 table. Similarly, the P3 table is used as a P2 table and the P2 table is treated like a P1 table. Thus the P1 table becomes the target page and can be accessed through the offset.</p>
+
+<p>It&rsquo;s also possible to access P2 tables by looping twice. And if we select the 511th entry three times, we can access and modify P3 tables:</p>
+
+<p><img src="/images/recursive_mapping_access_p3.svg" alt="access P3 table through recursive paging" /></p>
+
+<p>So we just need to specify the desired P3 table in the address through the P1 index. By choosing the 511th entry multiple times, we stay on the P4 table until the address&rsquo;s P1 index becomes the actual P4 index.</p>
+
+<p>To access the P4 table itself, we loop once more and thus never leave the frame:</p>
+
+<p><img src="/images/recursive_mapping_access_p4.svg" alt="access P4 table through recursive paging" /></p>
+
+<p>So we can access and modify page tables of all levels by just setting one P4 entry once. Most work is done by the CPU, we just the recursive entry to remove one or more translation levels. It may seem a bit strange at first, but it&rsquo;s a clean and simple solution once you wrapped your head around it.</p>
+
+<p>By using recursive mapping, each page table is accessible through an unique virtual address. The math checks out, too: If all page tables are used, there is 1 P4 table, 511 P3 tables (the last entry is used for the recursive mapping), <code>511*512</code> P2 tables, and <code>511*512*512</code> P1 tables. So there are <code>134217728</code> page tables altogether. Each page table occupies 4KiB, so we need <code>134217728 * 4KiB = 512GiB</code> to store them. That&rsquo;s exactly the amount of memory that can be accessed through one P4 entry since <code>4KiB per page * 512 P1 entries * 512 P2 entries * 512 P3 entries = 512GiB</code>.</p>
+
+<p>Of course recursive mapping has some disadvantages, too. It occupies a P4 entry and thus 512GiB of the virtual address space. But since we&rsquo;re in long mode and have a 48-bit address space, there are still 225.5TiB left. The bigger problem is that only the active table can be modified by default. To access another table, the recursive entry needs to be replaced temporary. We will tackle this problem in the next post when we switch to a new page table.</p>
+
+<h3 id="implementation">Implementation</h3>
+
+<p>To map the P4 table recursively, we just need to point the 511th entry to the table itself. Of course we could do it in Rust, but it would require some fiddling with unsafe pointers. It&rsquo;s easier to just add some lines to our boot assembly:</p>
+<div class="highlight"><pre><code class="language-nasm" data-lang="nasm"><span></span><span class="nf">mov</span> <span class="nb">eax</span><span class="p">,</span> <span class="nv">p4_table</span>
+<span class="nf">or</span> <span class="nb">eax</span><span class="p">,</span> <span class="mb">0b</span><span class="mi">11</span> <span class="c1">; present + writable</span>
+<span class="nf">mov</span> <span class="p">[</span><span class="nv">p4_table</span> <span class="o">+</span> <span class="mi">511</span> <span class="o">*</span> <span class="mi">8</span><span class="p">],</span> <span class="nb">eax</span>
+</code></pre></div>
+
+<p>I put it right after the <code>set_up_page_tables</code> label, but you can add it wherever you like.</p>
+
+<p>Now we can use special virtual addresses to access the page tables. The P4 table is available at <code>0xfffffffffffff000</code>. Let&rsquo;s add a P4 constant to the <code>table</code> submodule:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">P4</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0xffffffff_fffff000</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+
+<p>Let&rsquo;s switch to the octal system, since it makes more sense for the other special addresses. The P4 address from above is equivalent to <code>0o177777_777_777_777_777_0000</code> in octal. You can see that is has index <code>777</code> in all tables and offset <code>0000</code>. The <code>177777</code> bits on the left are the sign extension bits, which are copies of the 47th bit. They are required because x86 only uses 48bit virtual addresses.</p>
+
+<p>The other tables can be accessed through the following addresses:</p>
+
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Address</th>
+<th>Indexes</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td>P4</td>
+<td><code>0o177777_777_777_777_777_0000</code></td>
+<td>–</td>
+</tr>
+
+<tr>
+<td>P3</td>
+<td><code>0o177777_777_777_777_XXX_0000</code></td>
+<td><code>XXX</code> is the P4 index</td>
+</tr>
+
+<tr>
+<td>P2</td>
+<td><code>0o177777_777_777_XXX_YYY_0000</code></td>
+<td>like above, and <code>YYY</code> is the P3 index</td>
+</tr>
+
+<tr>
+<td>P1</td>
+<td><code>0o177777_777_XXX_YYY_ZZZ_0000</code></td>
+<td>like above, and <code>ZZZ</code> is the P2 index</td>
+</tr>
+</tbody>
+</table>
+
+<p>If we look closely, we can see that the P3 address is equal to <code>(P4 &lt;&lt; 9) | XXX_0000</code>. And the P2 address is calculated through <code>(P3 &lt;&lt; 9) | YYY_0000</code>. So to get the next address, we need to shift it 9 bits to the left and add the table index. As a formula:</p>
+<div class="highlight"><pre><span></span>next_table_address = (table_address &lt;&lt; 9) | (index &lt;&lt; 12)
+</pre></div>
+
+<h3 id="the-next-table-methods">The <code>next_table</code> Methods</h3>
+
+<p>Let&rsquo;s add the above formula as a <code>Table</code> method:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">fn</span><span class="w"> </span><span class="n">next_table_address</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">entry_flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">flags</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">entry_flags</span><span class="p">.</span><span class="n">contains</span><span class="p">(</span><span class="n">PRESENT</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">entry_flags</span><span class="p">.</span><span class="n">contains</span><span class="p">(</span><span class="n">HUGE_PAGE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">table_address</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Some</span><span class="p">((</span><span class="n">table_address</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">9</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="n">index</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">12</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">None</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The next table address is only valid if the corresponding entry is present and does not create a huge page. Then we can do some pointer casting to get the table address and use the formula to calculate the next address.</p>
+
+<p>If the index is out of bounds, the function will panic since Rust checks array bounds. The panic is desired here since a wrong index should not be possible and indicates a bug.</p>
+
+<p>To convert the address into references, we add two functions:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">next_table</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;&amp;</span><span class="n">Table</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">next_table_address</span><span class="p">(</span><span class="n">index</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">map</span><span class="p">(</span><span class="o">|</span><span class="n">address</span><span class="o">|</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;*</span><span class="p">(</span><span class="n">address</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="p">})</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">next_table_mut</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Table</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">next_table_address</span><span class="p">(</span><span class="n">index</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">map</span><span class="p">(</span><span class="o">|</span><span class="n">address</span><span class="o">|</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">address</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="p">})</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We convert the address into raw pointers through <code>as</code> casts and then convert them into Rust references through <code>&amp;mut *</code>. The latter is an <code>unsafe</code> operation since Rust can&rsquo;t guarantee that the raw pointer is valid.</p>
+
+<p>Note that <code>self</code> stays borrowed as long as the returned reference is valid. This is because of Rust&rsquo;s <a href="https://doc.rust-lang.org/book/lifetimes.html#lifetime-elision">lifetime elision</a> rules. Basically, these rules say that the lifetime of an output reference is the same as the lifetime of the input reference by default. So the above function signatures are expanded to:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">next_table</span><span class="o">&lt;</span><span class="na">&#39;a</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="na">&#39;a</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;&amp;</span><span class="na">&#39;a</span><span class="w"> </span><span class="n">Table</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">next_table_mut</span><span class="o">&lt;</span><span class="na">&#39;a</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="na">&#39;a</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;&amp;</span><span class="na">&#39;a</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">Table</span><span class="o">&gt;</span><span class="w"></span>
+<span class="p">{...}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Note the additional lifetime parameters, which are identical for input and output references. That&rsquo;s exactly what we want. It ensures that we can&rsquo;t modify tables as long as we have references to lower tables. For example, it would be very bad if we could unmap a P3 table if we still write to one of its P2 tables.</p>
+
+<h4 id="safety">Safety</h4>
+
+<p>Now we can start at the <code>P4</code> constant and use the <code>next_table</code> functions to access the lower tables. And we don&rsquo;t even need <code>unsafe</code> blocks to do it! Right now, your alarm bells should be ringing. Thanks to Rust, everything we&rsquo;ve done before in this post was completely safe. But we just introduced two unsafe blocks to convince Rust that there are valid tables at the specified addresses. Can we really be sure?</p>
+
+<p>First, these addresses are only valid if the P4 table is mapped recursively. Since the paging module will be the only module that modifies page tables, we can introduce an invariant for the module:</p>
+
+<blockquote>
+<p><em>The 511th entry of the active P4 table must always be mapped to the active P4 table itself.</em></p>
+</blockquote>
+
+<p>So if we switch to another P4 table at some time, it needs to be identity mapped <em>before</em> it becomes active. As long as we obey this invariant, we can safely use the special addresses. But even with this invariant, there is a big problem with the two methods:</p>
+
+<p><em>What happens if we call them on a P1 table?</em></p>
+
+<p>Well, they would calculate the address of the next table (which does not exist) and treat it as a page table. Either they construct an invalid address (if <code>XXX &lt; 400</code>)<sup class="footnote-ref" id="fnref:fn-invalid-address"><a rel="footnote" href="#fn:fn-invalid-address">1</a></sup> or access the mapped page itself. That way, we could easily corrupt memory or cause CPU exceptions by accident. So these two functions are not <em>safe</em> in Rust terms. Thus we need to make them <code>unsafe</code> functions unless we find some clever solution.</p>
+
+<h2 id="some-clever-solution">Some Clever Solution</h2>
+
+<p>We can use Rust&rsquo;s type system to statically guarantee that the <code>next_table</code> methods can only be called on P4, P3, and P2 tables, but not on a P1 table. The idea is to add a <code>Level</code> parameter to the <code>Table</code> type and implement the <code>next_table</code> methods only for level 4, 3, and 2.</p>
+
+<p>To model the levels we use a trait and empty enums:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">TableLevel</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="n">Level4</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="n">Level3</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="n">Level2</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="n">Level1</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">TableLevel</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Level4</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="k">impl</span><span class="w"> </span><span class="n">TableLevel</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Level3</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="k">impl</span><span class="w"> </span><span class="n">TableLevel</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Level2</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="k">impl</span><span class="w"> </span><span class="n">TableLevel</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Level1</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+</code></pre></div>
+
+<p>An empty enum has size zero and disappears completely after compiling. Unlike an empty struct, it&rsquo;s not possible to instantiate an empty enum. Since we will use <code>TableLevel</code> and the table levels in exported types, they need to be public.</p>
+
+<p>To differentiate the P1 table from the other tables, we introduce a <code>HierarchicalLevel</code> trait, which is a subtrait of <code>TableLevel</code>. But we implement it only for the levels 4, 3, and 2:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">HierarchicalLevel</span><span class="o">:</span><span class="w"> </span><span class="n">TableLevel</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">HierarchicalLevel</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Level4</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="k">impl</span><span class="w"> </span><span class="n">HierarchicalLevel</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Level3</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="k">impl</span><span class="w"> </span><span class="n">HierarchicalLevel</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Level2</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we add the level parameter to the <code>Table</code> type:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">marker</span><span class="o">::</span><span class="n">PhantomData</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">L</span><span class="o">:</span><span class="w"> </span><span class="n">TableLevel</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">entries</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="n">Entry</span><span class="p">;</span><span class="w"> </span><span class="n">ENTRY_COUNT</span><span class="p">],</span><span class="w"></span>
+<span class="w">    </span><span class="n">level</span><span class="o">:</span><span class="w"> </span><span class="n">PhantomData</span><span class="o">&lt;</span><span class="n">L</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We need to add a <a href="https://doc.rust-lang.org/core/marker/struct.PhantomData.html#unused-type-parameters">PhantomData</a> field because unused type parameters are not allowed in Rust.</p>
+
+<p>Since we changed the <code>Table</code> type, we need to update every use of it:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">P4</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">Level4</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0xffffffff_fffff000</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="p">;</span><span class="w"></span>
+<span class="p">...</span><span class="w"></span>
+<span class="k">impl</span><span class="o">&lt;</span><span class="n">L</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">L</span><span class="o">&gt;</span><span class="w"> </span><span class="n">where</span><span class="w"> </span><span class="n">L</span><span class="o">:</span><span class="w"> </span><span class="n">TableLevel</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">zero</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="o">&lt;</span><span class="n">L</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">L</span><span class="o">&gt;</span><span class="w"> </span><span class="n">where</span><span class="w"> </span><span class="n">L</span><span class="o">:</span><span class="w"> </span><span class="n">HierarchicalLevel</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">next_table</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;&amp;</span><span class="n">Table</span><span class="o">&lt;???&gt;&gt;</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">next_table_mut</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;???&gt;&gt;</span><span class="w"></span>
+<span class="w">    </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">next_table_address</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="o">&lt;</span><span class="n">L</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Index</span><span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">L</span><span class="o">&gt;</span><span class="w"> </span><span class="n">where</span><span class="w"> </span><span class="n">L</span><span class="o">:</span><span class="w"> </span><span class="n">TableLevel</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="o">&lt;</span><span class="n">L</span><span class="o">&gt;</span><span class="w"> </span><span class="n">IndexMut</span><span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">L</span><span class="o">&gt;</span><span class="w"> </span><span class="n">where</span><span class="w"> </span><span class="n">L</span><span class="o">:</span><span class="w"> </span><span class="n">TableLevel</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now the <code>next_table</code> methods are only available for P4, P3, and P2 tables. But they have the incomplete return type <code>Table&lt;???&gt;</code> now. What should we fill in for the <code>???</code>?</p>
+
+<p>For a P4 table we would like to return a <code>Table&lt;Level3&gt;</code>, for a P3 table a <code>Table&lt;Level2&gt;</code>, and for a P2 table a <code>Table&lt;Level1&gt;</code>. So we want to return a table of the <em>next level</em>.</p>
+
+<p>We can define the next level by adding an associated type to the <code>HierarchicalLevel</code> trait:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">trait</span><span class="w"> </span><span class="n">HierarchicalLevel</span><span class="o">:</span><span class="w"> </span><span class="n">TableLevel</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span><span class="w"> </span><span class="n">NextLevel</span><span class="o">:</span><span class="w"> </span><span class="n">TableLevel</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">HierarchicalLevel</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Level4</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span><span class="w"> </span><span class="n">NextLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Level3</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">HierarchicalLevel</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Level3</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span><span class="w"> </span><span class="n">NextLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Level2</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">HierarchicalLevel</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Level2</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span><span class="w"> </span><span class="n">NextLevel</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Level1</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we can replace the <code>Table&lt;???&gt;</code> types with <code>Table&lt;L::NextLevel&gt;</code> types and our code works as intended. You can try it with a simple test function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">fn</span><span class="w"> </span><span class="n">test</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">p4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;*</span><span class="n">P4</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="n">p4</span><span class="p">.</span><span class="n">next_table</span><span class="p">(</span><span class="mi">42</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">p3</span><span class="o">|</span><span class="w"> </span><span class="n">p3</span><span class="p">.</span><span class="n">next_table</span><span class="p">(</span><span class="mi">1337</span><span class="p">))</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">p2</span><span class="o">|</span><span class="w"> </span><span class="n">p2</span><span class="p">.</span><span class="n">next_table</span><span class="p">(</span><span class="mh">0xdeadbeaf</span><span class="p">))</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">p1</span><span class="o">|</span><span class="w"> </span><span class="n">p1</span><span class="p">.</span><span class="n">next_table</span><span class="p">(</span><span class="mh">0xcafebabe</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Most of the indexes are completely out of bounds, so it would panic if it&rsquo;s called. But we don&rsquo;t need to call it since it already fails at compile time:</p>
+<div class="highlight"><pre><span></span><span class="n">error</span><span class="o">:</span> <span class="n">no</span> <span class="n">method</span> <span class="n">named</span> <span class="err">`</span><span class="n">next_table</span><span class="err">`</span> <span class="n">found</span> <span class="k">for</span> <span class="n">type</span>
+  <span class="err">`</span><span class="o">&amp;</span><span class="n">memory</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">table</span><span class="o">::</span><span class="n">Table</span><span class="o">&lt;</span><span class="n">memory</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">table</span><span class="o">::</span><span class="n">Level1</span><span class="o">&gt;</span><span class="err">`</span>
+  <span class="k">in</span> <span class="n">the</span> <span class="n">current</span> <span class="n">scope</span>
+</pre></div>
+
+<p>Remember that this is bare metal kernel code. We just used type system magic to make low-level page table manipulations safer. Rust is just awesome!</p>
+
+<h2 id="translating-addresses">Translating Addresses</h2>
+
+<p>Now let&rsquo;s do something useful with our new module. We will create a function that translates a virtual address to the corresponding physical address. We add it to the <code>paging/mod.rs</code> module:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">translate</span><span class="p">(</span><span class="n">virtual_address</span><span class="o">:</span><span class="w"> </span><span class="n">VirtualAddress</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">PhysicalAddress</span><span class="o">&gt;</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">virtual_address</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">PAGE_SIZE</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">translate_page</span><span class="p">(</span><span class="n">Page</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">virtual_address</span><span class="p">))</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">map</span><span class="p">(</span><span class="o">|</span><span class="n">frame</span><span class="o">|</span><span class="w"> </span><span class="n">frame</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">PAGE_SIZE</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">offset</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>It uses two functions we haven&rsquo;t defined yet: <code>translate_page</code> and <code>Page::containing_address</code>. Let&rsquo;s start with the latter:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">containing_address</span><span class="p">(</span><span class="n">address</span><span class="o">:</span><span class="w"> </span><span class="n">VirtualAddress</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Page</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">assert</span><span class="o">!</span><span class="p">(</span><span class="n">address</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mh">0x0000_8000_0000_0000</span><span class="w"> </span><span class="o">||</span><span class="w"></span>
+<span class="w">        </span><span class="n">address</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mh">0xffff_8000_0000_0000</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="s">&quot;invalid address: 0x{:x}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">address</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">Page</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">number</span><span class="o">:</span><span class="w"> </span><span class="n">address</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">PAGE_SIZE</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The assertion is needed because there can be invalid addresses. Addresses on x86 are just 48-bit long and the other bits are just <em>sign extension</em>, i.e. a copy of the most significant bit. For example:</p>
+<div class="highlight"><pre><span></span>invalid address: 0x0000_8000_0000_0000
+valid address:   0xffff_8000_0000_0000
+                        └── bit 47
+</pre></div>
+
+<p>So the address space is split into two halves: the <em>higher half</em> containing addresses with sign extension and the <em>lower half</em> containing addresses without. Everything in between is invalid.</p>
+
+<p>Since we added <code>containing_address</code>, we add the inverse method as well (maybe we need it later):</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">fn</span><span class="w"> </span><span class="n">start_address</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">PAGE_SIZE</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The other missing function, <code>translate_page</code>, looks like this:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="n">Frame</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">translate_page</span><span class="p">(</span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Frame</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">entry</span><span class="o">::</span><span class="n">HUGE_PAGE</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">p3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;*</span><span class="n">table</span><span class="o">::</span><span class="n">P4</span><span class="w"> </span><span class="p">}.</span><span class="n">next_table</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">p4_index</span><span class="p">());</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">huge_page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// TODO</span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">p3</span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">p3</span><span class="o">|</span><span class="w"> </span><span class="n">p3</span><span class="p">.</span><span class="n">next_table</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">p3_index</span><span class="p">()))</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">p2</span><span class="o">|</span><span class="w"> </span><span class="n">p2</span><span class="p">.</span><span class="n">next_table</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">p2_index</span><span class="p">()))</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">p1</span><span class="o">|</span><span class="w"> </span><span class="n">p1</span><span class="p">[</span><span class="n">page</span><span class="p">.</span><span class="n">p1_index</span><span class="p">()].</span><span class="n">pointed_frame</span><span class="p">())</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="n">or_else</span><span class="p">(</span><span class="n">huge_page</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We use an unsafe block to convert the raw <code>P4</code> pointer to a reference. Then we use the <a href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html#method.and_then">Option::and_then</a> function to go through the four table levels. If some entry along the way is <code>None</code>, we check if the page is a huge page through the (unimplemented) <code>huge_page</code> closure.</p>
+
+<p>The <code>Page::p*_index</code> functions return the different table indexes. They look like this:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">fn</span><span class="w"> </span><span class="n">p4_index</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">27</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mo">0o777</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">fn</span><span class="w"> </span><span class="n">p3_index</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">18</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mo">0o777</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">fn</span><span class="w"> </span><span class="n">p2_index</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">9</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mo">0o777</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">fn</span><span class="w"> </span><span class="n">p1_index</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="mo">0o777</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<h3 id="safety-1">Safety</h3>
+
+<p>We use an <code>unsafe</code> block to convert the raw <code>P4</code> pointer into a shared reference. It&rsquo;s safe because we don&rsquo;t create any <code>&amp;mut</code> references to the table right now and don&rsquo;t switch the P4 table either. But as soon as we do something like that, we have to revisit this method.</p>
+
+<h3 id="huge-pages">Huge Pages</h3>
+
+<p>The <code>huge_page</code> closure calculates the corresponding frame if huge pages are used. Its content looks like this:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="n">p3</span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">p3</span><span class="o">|</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="kd">let</span><span class="w"> </span><span class="n">p3_entry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">p3</span><span class="p">[</span><span class="n">page</span><span class="p">.</span><span class="n">p3_index</span><span class="p">()];</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// 1GiB page?</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">start_frame</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p3_entry</span><span class="p">.</span><span class="n">pointed_frame</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="n">p3_entry</span><span class="p">.</span><span class="n">flags</span><span class="p">().</span><span class="n">contains</span><span class="p">(</span><span class="n">HUGE_PAGE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">              </span><span class="c1">// address must be 1GiB aligned</span>
+<span class="w">              </span><span class="n">assert</span><span class="o">!</span><span class="p">(</span><span class="n">start_frame</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="p">(</span><span class="n">ENTRY_COUNT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">ENTRY_COUNT</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">              </span><span class="k">return</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">Frame</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                  </span><span class="n">number</span><span class="o">:</span><span class="w"> </span><span class="n">start_frame</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">page</span><span class="p">.</span><span class="n">p2_index</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="w"></span>
+<span class="w">                          </span><span class="n">ENTRY_COUNT</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">page</span><span class="p">.</span><span class="n">p1_index</span><span class="p">(),</span><span class="w"></span>
+<span class="w">              </span><span class="p">});</span><span class="w"></span>
+<span class="w">          </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">p2</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p3</span><span class="p">.</span><span class="n">next_table</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">p3_index</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="kd">let</span><span class="w"> </span><span class="n">p2_entry</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">p2</span><span class="p">[</span><span class="n">page</span><span class="p">.</span><span class="n">p2_index</span><span class="p">()];</span><span class="w"></span>
+<span class="w">          </span><span class="c1">// 2MiB page?</span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">start_frame</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p2_entry</span><span class="p">.</span><span class="n">pointed_frame</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">              </span><span class="k">if</span><span class="w"> </span><span class="n">p2_entry</span><span class="p">.</span><span class="n">flags</span><span class="p">().</span><span class="n">contains</span><span class="p">(</span><span class="n">HUGE_PAGE</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                  </span><span class="c1">// address must be 2MiB aligned</span>
+<span class="w">                  </span><span class="n">assert</span><span class="o">!</span><span class="p">(</span><span class="n">start_frame</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="n">ENTRY_COUNT</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">                  </span><span class="k">return</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">Frame</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                      </span><span class="n">number</span><span class="o">:</span><span class="w"> </span><span class="n">start_frame</span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">page</span><span class="p">.</span><span class="n">p1_index</span><span class="p">()</span><span class="w"></span>
+<span class="w">                  </span><span class="p">});</span><span class="w"></span>
+<span class="w">              </span><span class="p">}</span><span class="w"></span>
+<span class="w">          </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="nb">None</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+</code></pre></div>
+
+<p>This function is much longer and more complex than the <code>translate_page</code> function itself. To avoid this complexity in the future, we will only work with standard 4KiB pages from now on.</p>
+
+<h2 id="mapping-pages">Mapping Pages</h2>
+
+<p>Let&rsquo;s add a function that modifies the page tables to map a <code>Page</code> to a <code>Frame</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">entry</span><span class="o">::*</span><span class="p">;</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="n">FrameAllocator</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">map_to</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"> </span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="o">:</span><span class="w"> </span><span class="n">EntryFlags</span><span class="p">,</span><span class="w"></span>
+<span class="w">                 </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">p4</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="o">*</span><span class="n">P4</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">p3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p4</span><span class="p">.</span><span class="n">next_table_create</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">p4_index</span><span class="p">(),</span><span class="w"> </span><span class="n">allocator</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">p2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p3</span><span class="p">.</span><span class="n">next_table_create</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">p3_index</span><span class="p">(),</span><span class="w"> </span><span class="n">allocator</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">p1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p2</span><span class="p">.</span><span class="n">next_table_create</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">p2_index</span><span class="p">(),</span><span class="w"> </span><span class="n">allocator</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">assert</span><span class="o">!</span><span class="p">(</span><span class="n">p1</span><span class="p">[</span><span class="n">page</span><span class="p">.</span><span class="n">p1_index</span><span class="p">()].</span><span class="n">is_unused</span><span class="p">());</span><span class="w"></span>
+<span class="w">    </span><span class="n">p1</span><span class="p">[</span><span class="n">page</span><span class="p">.</span><span class="n">p1_index</span><span class="p">()].</span><span class="n">set</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">PRESENT</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We add an reexport for all <code>entry</code> types since they are required to call the function. We assert that the page is unmapped and always set the present flag (since it wouldn&rsquo;t make sense to map a page without setting it).</p>
+
+<p>The <code>Table::next_table_create</code> method doesn&rsquo;t exist yet. It should return the next table if it exists, or create a new one. Therefor we need the <code>FrameAllocator</code> from the <a href="/allocating-frames.html#a-memory-module">previous post</a> and the <code>Table::zero</code> method:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="n">memory</span><span class="o">::</span><span class="n">FrameAllocator</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">next_table_create</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"></span>
+<span class="w">                            </span><span class="n">index</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">                            </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">                            </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">L</span><span class="o">::</span><span class="n">NextLevel</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">next_table</span><span class="p">(</span><span class="n">index</span><span class="p">).</span><span class="n">is_none</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">assert</span><span class="o">!</span><span class="p">(</span><span class="o">!</span><span class="bp">self</span><span class="p">.</span><span class="n">entries</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">flags</span><span class="p">().</span><span class="n">contains</span><span class="p">(</span><span class="n">HUGE_PAGE</span><span class="p">),</span><span class="w"></span>
+<span class="w">                </span><span class="s">&quot;mapping code does not support huge pages&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">allocator</span><span class="p">.</span><span class="n">allocate_frame</span><span class="p">().</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;no frames available&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">entries</span><span class="p">[</span><span class="n">index</span><span class="p">].</span><span class="n">set</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">PRESENT</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">WRITABLE</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">next_table_mut</span><span class="p">(</span><span class="n">index</span><span class="p">).</span><span class="n">unwrap</span><span class="p">().</span><span class="n">zero</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">next_table_mut</span><span class="p">(</span><span class="n">index</span><span class="p">).</span><span class="n">unwrap</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We can use <code>unwrap()</code> here since the next table definitely exists.</p>
+
+<h3 id="safety-2">Safety</h3>
+
+<p>We used an <code>unsafe</code> block in <code>map_to</code> to convert the raw <code>P4</code> pointer to a <code>&amp;mut</code> reference. That&rsquo;s bad. It&rsquo;s now possible that the <code>&amp;mut</code> reference is not exclusive, which breaks Rust&rsquo;s guarantees. It&rsquo;s only a matter time before we run into a data race. For example, imagine that one thread maps an entry to <code>frame_A</code> and another thread (on the same core) tries to map the same entry to <code>frame_B</code>.</p>
+
+<p>The problem is that there&rsquo;s no clear <em>owner</em> for the page tables. So let&rsquo;s define page table ownership!</p>
+
+<h3 id="page-table-ownership">Page Table Ownership</h3>
+
+<p>We define the following:</p>
+
+<blockquote>
+<p>A page table owns all of its subtables.</p>
+</blockquote>
+
+<p>We already obey this rule: To get a reference to a table, we need to borrow it from its parent table through the <code>next_table</code> method. But who owns the P4 table?</p>
+
+<blockquote>
+<p>The recursively mapped P4 table is owned by a <code>ActivePageTable</code> struct.</p>
+</blockquote>
+
+<p>We just defined some random owner for the P4 table. But it will solve our problems. And it will also provide the interface to other modules.</p>
+
+<p>So let&rsquo;s create the struct:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">table</span><span class="o">::</span><span class="p">{</span><span class="n">Table</span><span class="p">,</span><span class="w"> </span><span class="n">Level4</span><span class="p">};</span><span class="w"></span>
+<span class="kn">use</span><span class="w"> </span><span class="n">core</span><span class="o">::</span><span class="n">ptr</span><span class="o">::</span><span class="n">Unique</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">p4</span><span class="o">:</span><span class="w"> </span><span class="n">Unique</span><span class="o">&lt;</span><span class="n">Table</span><span class="o">&lt;</span><span class="n">Level4</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We can&rsquo;t store the <code>Table&lt;Level4&gt;</code> directly because it needs to be at a special memory location (like the <a href="/printing-to-screen.html#the-text-buffer">VGA text buffer</a>). We could use a raw pointer or <code>&amp;mut</code> instead of <a href="https://doc.rust-lang.org/nightly/core/ptr/struct.Unique.html">Unique</a>, but Unique indicates ownership better.</p>
+
+<p>Because the <code>ActivePageTable</code> owns the unique recursive mapped P4 table, there must be only one <code>ActivePageTable</code> instance. Thus we make the constructor function unsafe:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">impl</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">p4</span><span class="o">:</span><span class="w"> </span><span class="n">Unique</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="n">table</span><span class="o">::</span><span class="n">P4</span><span class="p">),</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We add some methods to get P4 references:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">fn</span><span class="w"> </span><span class="n">p4</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Table</span><span class="o">&lt;</span><span class="n">Level4</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">p4</span><span class="p">.</span><span class="n">get</span><span class="p">()</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">p4_mut</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">Level4</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">p4</span><span class="p">.</span><span class="n">get_mut</span><span class="p">()</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Since we will only create valid P4 pointers, the <code>unsafe</code> blocks are safe. However, we don&rsquo;t make these functions public since they can be used to make page tables invalid. Only the higher level functions (such as <code>translate</code> or <code>map_to</code>) should be usable from other modules.</p>
+
+<p>Now we can make the <code>map_to</code> and <code>translate</code> functions safe by making them methods of <code>ActivePageTable</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">impl</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">new</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">p4</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Table</span><span class="o">&lt;</span><span class="n">Level4</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">p4_mut</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">Table</span><span class="o">&lt;</span><span class="n">Level4</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{...}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">translate</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">virtual_address</span><span class="o">:</span><span class="w"> </span><span class="n">VirtualAddress</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">PhysicalAddress</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">    </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="p">...</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">translate_page</span><span class="p">(...).</span><span class="n">map</span><span class="p">(...)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">translate_page</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Frame</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">p3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">p4</span><span class="p">().</span><span class="n">next_table</span><span class="p">(...);</span><span class="w"></span>
+<span class="w">        </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">map_to</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"></span>
+<span class="w">                     </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"></span>
+<span class="w">                     </span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"></span>
+<span class="w">                     </span><span class="n">flags</span><span class="o">:</span><span class="w"> </span><span class="n">EntryFlags</span><span class="p">,</span><span class="w"></span>
+<span class="w">                     </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="w">    </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">p3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">p4_mut</span><span class="p">().</span><span class="n">next_table_create</span><span class="p">(...);</span><span class="w"></span>
+<span class="w">        </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now the <code>p4()</code> and <code>p4_mut()</code> methods should be the only methods containing an <code>unsafe</code> block in the <code>paging/mod.rs</code> file.</p>
+
+<h3 id="more-mapping-functions">More Mapping Functions</h3>
+
+<p>For convenience, we add a <code>map</code> method that just picks a free frame for us:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">map</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="o">:</span><span class="w"> </span><span class="n">EntryFlags</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">allocator</span><span class="p">.</span><span class="n">allocate_frame</span><span class="p">().</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;out of memory&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">map_to</span><span class="p">(</span><span class="n">page</span><span class="p">,</span><span class="w"> </span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We also add a <code>identity_map</code> function to make it easier to remap the kernel in the next post:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">identity_map</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"></span>
+<span class="w">                       </span><span class="n">frame</span><span class="o">:</span><span class="w"> </span><span class="n">Frame</span><span class="p">,</span><span class="w"></span>
+<span class="w">                       </span><span class="n">flags</span><span class="o">:</span><span class="w"> </span><span class="n">EntryFlags</span><span class="p">,</span><span class="w"></span>
+<span class="w">                       </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Page</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">frame</span><span class="p">.</span><span class="n">start_address</span><span class="p">());</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">map_to</span><span class="p">(</span><span class="n">page</span><span class="p">,</span><span class="w"> </span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<h3 id="unmapping-pages">Unmapping Pages</h3>
+
+<p>To unmap a page, we set the corresponding P1 entry to unused:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">fn</span><span class="w"> </span><span class="n">unmap</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="n">Page</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">assert</span><span class="o">!</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">translate</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">start_address</span><span class="p">()).</span><span class="n">is_some</span><span class="p">());</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">p1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">p4_mut</span><span class="p">()</span><span class="w"></span>
+<span class="w">                 </span><span class="p">.</span><span class="n">next_table_mut</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">p4_index</span><span class="p">())</span><span class="w"></span>
+<span class="w">                 </span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">p3</span><span class="o">|</span><span class="w"> </span><span class="n">p3</span><span class="p">.</span><span class="n">next_table_mut</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">p3_index</span><span class="p">()))</span><span class="w"></span>
+<span class="w">                 </span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">p2</span><span class="o">|</span><span class="w"> </span><span class="n">p2</span><span class="p">.</span><span class="n">next_table_mut</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">p2_index</span><span class="p">()))</span><span class="w"></span>
+<span class="w">                 </span><span class="p">.</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;mapping code does not support huge pages&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p1</span><span class="p">[</span><span class="n">page</span><span class="p">.</span><span class="n">p1_index</span><span class="p">()].</span><span class="n">pointed_frame</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">p1</span><span class="p">[</span><span class="n">page</span><span class="p">.</span><span class="n">p1_index</span><span class="p">()].</span><span class="n">set_unused</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// TODO free p(1,2,3) table if empty</span>
+<span class="w">    </span><span class="n">allocator</span><span class="p">.</span><span class="n">deallocate_frame</span><span class="p">(</span><span class="n">frame</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The assertion ensures that the page is mapped. Thus the corresponding P1 table and frame must exist for a standard 4KiB page. We set the entry to unused and free the associated frame in the supplied frame allocator.</p>
+
+<p>We can also free the P1, P2, or even P3 table when the last entry is freed. But checking the whole table on every <code>unmap</code> would be very expensive. So we leave the <code>TODO</code> in place until we find a good solution. I&rsquo;m open for suggestions :).</p>
+
+<p><em>Spoiler</em>: There is an ugly bug in this function, which we will find in the next section.</p>
+
+<h2 id="testing-and-bugfixing">Testing and Bugfixing</h2>
+
+<p>To test it, we add a <code>test_paging</code> function in <code>memory/paging/mod.rs</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">test_paging</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="n">where</span><span class="w"> </span><span class="n">A</span><span class="o">:</span><span class="w"> </span><span class="n">FrameAllocator</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">page_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ActivePageTable</span><span class="o">::</span><span class="n">new</span><span class="p">()</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// test it</span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We borrow the frame allocator since we will need it for the mapping functions. To be able to call that function from main, we need to reexport it in <code>memory/mod.rs</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in memory/mod.rs</span>
+<span class="k">pub</span><span class="w"> </span><span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">test_paging</span><span class="p">;</span><span class="w"></span>
+
+<span class="c1">// lib.rs</span>
+<span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">frame_allocator</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">...;</span><span class="w"></span>
+<span class="n">memory</span><span class="o">::</span><span class="n">test_paging</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">frame_allocator</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+
+<h3 id="translate">translate</h3>
+
+<p>First, we translate some addresses:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// address 0 is mapped</span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Some = {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">page_table</span><span class="p">.</span><span class="n">translate</span><span class="p">(</span><span class="mi">0</span><span class="p">));</span><span class="w"></span>
+<span class="w"> </span><span class="c1">// second P1 entry</span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Some = {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">page_table</span><span class="p">.</span><span class="n">translate</span><span class="p">(</span><span class="mi">4096</span><span class="p">));</span><span class="w"></span>
+<span class="c1">// second P2 entry</span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Some = {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">page_table</span><span class="p">.</span><span class="n">translate</span><span class="p">(</span><span class="mi">512</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">4096</span><span class="p">));</span><span class="w"></span>
+<span class="c1">// 300th P2 entry</span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Some = {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">page_table</span><span class="p">.</span><span class="n">translate</span><span class="p">(</span><span class="mi">300</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">512</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">4096</span><span class="p">));</span><span class="w"></span>
+<span class="c1">// second P3 entry</span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;None = {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">page_table</span><span class="p">.</span><span class="n">translate</span><span class="p">(</span><span class="mi">512</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">512</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">4096</span><span class="p">));</span><span class="w"></span>
+<span class="c1">// last mapped byte</span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Some = {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">page_table</span><span class="p">.</span><span class="n">translate</span><span class="p">(</span><span class="mi">512</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">512</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">4096</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">));</span><span class="w"></span>
+</code></pre></div>
+
+<p>Currently, the first GiB of the address space is identity-mapped. Thus all addresses in this area should translate to <code>Some(x)</code>, where <code>x</code> is the virtual address. Only the second last address, <code>512 * 512 * 4096</code>, is not in that area and should resolve to <code>None</code>.</p>
+
+<p>But the output shows two <code>None</code> lines:</p>
+<div class="highlight"><pre><span></span>Some = Some(0)
+Some = Some(4096)
+Some = Some(2097152)
+Some = Some(629145600)
+None = None
+Some = None
+</pre></div>
+
+<p>The last line is wrong. But why?</p>
+
+<p>In fact, all addresses above <code>344 * 512 * 4096</code> seem to get translated to <code>None</code>. But even worse, there are some wrong translations, too. For example, on my machine <code>357 * 512 * 4096</code> translates to roughly <code>255TiB</code>:</p>
+<div class="highlight"><pre><span></span>Some(280735973961728)
+</pre></div>
+
+<p>Something is terribly wrong here. But it&rsquo;s not our code.</p>
+
+<p>The reason for this bug is a silent stack overflow. Remember, our <code>.bss</code> section in the <code>boot.asm</code> file looks like this:</p>
+<div class="highlight"><pre><code class="language-nasm" data-lang="nasm"><span></span><span class="k">section</span> <span class="nv">.bss</span>
+<span class="k">align</span> <span class="mi">4096</span>
+<span class="nl">p4_table:</span>
+    <span class="kd">resb</span> <span class="mi">4096</span>
+<span class="nl">p3_table:</span>
+    <span class="kd">resb</span> <span class="mi">4096</span>
+<span class="nl">p2_table:</span>
+    <span class="kd">resb</span> <span class="mi">4096</span>
+<span class="nl">stack_bottom:</span>
+    <span class="kd">resb</span> <span class="mi">4096</span>
+<span class="nl">stack_top:</span>
+</code></pre></div>
+
+<p>So a stack overflow overwrites the P2 table, starting at the last entry. But the CPU still uses the memory as page table entries. And if the stack bytes contain the present byte, it seems to point to a frame and <code>translate</code> returns a (wrong) <code>Some</code>.</p>
+
+<p>To fix it, we double the stack size to <code>4096 * 2</code>. Now the last byte gets translated to <code>Some(1073741823)</code> correctly. To avoid this kind of bug in the future, we need to add a guard page to the stack, which causes an exception on stack overflow.  We will do that in the next post when we remap the kernel.</p>
+
+<h3 id="map-to">map_to</h3>
+
+<p>Let&rsquo;s test the <code>map_to</code> function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="kd">let</span><span class="w"> </span><span class="n">addr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">512</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">512</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">4096</span><span class="p">;</span><span class="w"> </span><span class="c1">// 42th P3 entry</span>
+<span class="kd">let</span><span class="w"> </span><span class="n">page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Page</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">addr</span><span class="p">);</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">frame</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">allocator</span><span class="p">.</span><span class="n">allocate_frame</span><span class="p">().</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;no more frames&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;None = {:?}, map to {:?}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">         </span><span class="n">page_table</span><span class="p">.</span><span class="n">translate</span><span class="p">(</span><span class="n">addr</span><span class="p">),</span><span class="w"></span>
+<span class="w">         </span><span class="n">frame</span><span class="p">);</span><span class="w"></span>
+<span class="n">page_table</span><span class="p">.</span><span class="n">map_to</span><span class="p">(</span><span class="n">page</span><span class="p">,</span><span class="w"> </span><span class="n">frame</span><span class="p">,</span><span class="w"> </span><span class="n">EntryFlags</span><span class="o">::</span><span class="n">empty</span><span class="p">(),</span><span class="w"> </span><span class="n">allocator</span><span class="p">);</span><span class="w"></span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;Some = {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">page_table</span><span class="p">.</span><span class="n">translate</span><span class="p">(</span><span class="n">addr</span><span class="p">));</span><span class="w"></span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;next free frame: {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">allocator</span><span class="p">.</span><span class="n">allocate_frame</span><span class="p">());</span><span class="w"></span>
+</code></pre></div>
+
+<p>We just map some random page to a free frame. To be able to borrow the page table as <code>&amp;mut</code>, we need to make it mutable.</p>
+
+<p>You should see output similar to this:</p>
+<div class="highlight"><pre><span></span>None = None, map to Frame { number: 0 }
+Some = Some(0)
+next free frame: Some(Frame { number: 3 })
+</pre></div>
+
+<p>It&rsquo;s frame 0 because it&rsquo;s the first frame returned by the frame allocator. Since we map the 42th P3 entry, the mapping code needs to create a P2 and a P1 table. So the next free frame returned by the allocator is frame 3.</p>
+
+<h3 id="unmap">unmap</h3>
+
+<p>To test the <code>unmap</code> function, we unmap the test page so that it translates to <code>None</code> again:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="n">page_table</span><span class="p">.</span><span class="n">unmap</span><span class="p">(</span><span class="n">Page</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">addr</span><span class="p">),</span><span class="w"> </span><span class="n">allocator</span><span class="p">);</span><span class="w"></span>
+<span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;None = {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">page_table</span><span class="p">.</span><span class="n">translate</span><span class="p">(</span><span class="n">addr</span><span class="p">));</span><span class="w"></span>
+</code></pre></div>
+
+<p>It causes a panic since we call the unimplemented <code>deallocate_frame</code> method in <code>unwrap</code>. If we comment this call out, it works without problems. But there is some bug in this function nevertheless.</p>
+
+<p>Let&rsquo;s read something from the mapped page (of course before we unmap it again):</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{:#x}&quot;</span><span class="p">,</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="o">*</span><span class="p">(</span><span class="n">Page</span><span class="o">::</span><span class="n">containing_address</span><span class="p">(</span><span class="n">addr</span><span class="p">).</span><span class="n">start_address</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"></span>
+<span class="p">});</span><span class="w"></span>
+</code></pre></div>
+
+<p>Since we don&rsquo;t zero the mapped pages, the output is random. For me, it&rsquo;s <code>0xf000ff53f000ff53</code>.</p>
+
+<p>If <code>unmap</code> worked correctly, reading it again after unmapping should cause a page fault. But it doesn&rsquo;t. Instead, it just prints the same number again. When we remove the first read, we get the desired page fault (i.e. QEMU reboots again and again). So this seems to be some cache issue.</p>
+
+<p>An x86 processor has many different caches because always accessing the main memory would be very slow. Most of these caches are completely <em>transparent</em>. That means everything works exactly the same as without them, it&rsquo;s just much faster. But there is one cache, that needs to be updated manually: the <em>translation lookaside buffer</em>.</p>
+
+<p>The translation lookaside buffer, or TLB, caches the translation of virtual to physical addresses. It&rsquo;s filled automatically when a page is accessed. But it&rsquo;s not updated transparently when the mapping of a page changes. This is the reason that we still can access the page even through we unmapped it in the page table.</p>
+
+<p>So to fix our <code>unmap</code> function, we need to remove the cached translation from the TLB. We can use Gerd Zellweger&rsquo;s <a href="https://github.com/gz/rust-x86">x86</a> crate to do this easily. To add it, we append the following to our <code>Cargo.toml</code>:</p>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="p">[</span><span class="n">dependencies</span><span class="p">.</span><span class="n">x86</span><span class="p">]</span>
+<span class="n">version</span> <span class="o">=</span> <span class="s">&quot;0.6.0&quot;</span>
+<span class="n">default-features</span> <span class="o">=</span> <span class="kc">false</span>
+</code></pre></div>
+
+<p>It has a <code>performance-counter</code> feature that allows reading the CPU specific <a href="http://gz.github.io/rust-x86/x86/perfcnt/index.html">performance counters</a> but increases compile times. We don&rsquo;t need it right now, so we disable it using <code>default-features = false</code>.</p>
+
+<p>Now we can use it to fix <code>unmap</code>:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="p">...</span><span class="w"></span>
+<span class="w">  </span><span class="n">p1</span><span class="p">[</span><span class="n">page</span><span class="p">.</span><span class="n">p1_index</span><span class="p">()].</span><span class="n">set_unused</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">tlb</span><span class="o">::</span><span class="n">flush</span><span class="p">(</span><span class="n">page</span><span class="p">.</span><span class="n">start_address</span><span class="p">());</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// TODO free p(1,2,3) table if empty</span>
+<span class="w">  </span><span class="c1">//allocator.deallocate_frame(frame);</span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now the desired page fault occurs even when we access the page before.</p>
+
+<h2 id="conclusion">Conclusion</h2>
+
+<p>This post has become pretty long. So let&rsquo;s summarize what we&rsquo;ve done:</p>
+
+<ul>
+<li>we created a paging module and modeled page tables plus entries</li>
+<li>we mapped the P4 page recursively and created <code>next_table</code> methods</li>
+<li>we used empty enums and associated types to make the <code>next_table</code> functions safe</li>
+<li>we wrote a function to translate virtual to physical addresses</li>
+<li>we created safe functions to map and unmap pages</li>
+<li>and we fixed stack overflow and TLB related bugs</li>
+</ul>
+
+<h2 id="what-s-next">What&rsquo;s next?</h2>
+
+<p>In the <a href="/remap-the-kernel.html">next post</a> we will extend this module and add a function to modify inactive page tables. Through that function, we will create a new page table hierarchy that maps the kernel correctly using 4KiB pages. Then we will switch to the new table to get a safer kernel environment.</p>
+
+<p>Afterwards, we will use this paging module to build a heap allocator. This will allow us to use allocation and collection types such as <code>Box</code> and <code>Vec</code>.</p>
+
+<p><small>Image sources: <sup class="footnote-ref" id="fnref:virtual-physical-translation-source"><a rel="footnote" href="#fn:virtual-physical-translation-source">2</a></sup></small></p>
+<div class="footnotes">
+
+<hr />
+
+<ol>
+<li id="fn:fn-invalid-address">If the <code>XXX</code> part of the address is smaller than <code>0o400</code>, it&rsquo;s binary representation doesn&rsquo;t start with <code>1</code>. But the sign extension bits, which should be a copy of that bit, are <code>1</code> instead of <code>0</code>. Thus the address is not valid.
+ <a class="footnote-return" href="#fnref:fn-invalid-address"><sup>[return]</sup></a></li>
+<li id="fn:virtual-physical-translation-source">Image sources: Modified versions of an image from  <a href="https://commons.wikimedia.org/wiki/File:X86_Paging_64bit.svg">Wikipedia</a>. The modified files are licensed under the Creative Commons Attribution-Share Alike 3.0 Unported license.
+ <a class="footnote-return" href="#fnref:virtual-physical-translation-source"><sup>[return]</sup></a></li>
+</ol>
+</div>
+
+</article>
+
+<hr>
+<div class="PageNavigation">
+  
+    <a class="prev" href="/allocating-frames.html">&laquo; Allocating Frames</a>
+  
+  
+    <a class="next" href="/remap-the-kernel.html">Remap the Kernel &raquo;</a>
+  
+</div>
+<hr>
+
+<div id="disqus_thread"></div>
+<script>
+  (function() {
+    
+    
+    if (window.location.hostname == "localhost")
+        return;
+
+    var d = document, s = d.createElement('script');
+
+    s.src = '//phil-opp.disqus.com/embed.js';
+
+    s.setAttribute('data-timestamp', +new Date());
+    (d.head || d.body).appendChild(s);
+  })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript" rel="nofollow">comments powered by Disqus.</a></noscript>
+
+</main>
+
+<footer class="footer">
+  <small>
+    &copy;
+    <time datetime="2016">2016</time>. All rights reserved.
+    <a href="/contact.html">Contact</a>
+  </small>
+</footer>
+</div>
+
+</body>
+</html>
+

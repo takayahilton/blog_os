@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  
+  <url>
+    <loc>http://os.phil-opp.com/</loc>
+    <lastmod>2016-04-11T00:00:00+00:00</lastmod>
+    <priority>0</priority>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/kernel-heap.html</loc>
+    <lastmod>2016-04-11T00:00:00+00:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/remap-the-kernel.html</loc>
+    <lastmod>2016-01-01T00:00:00+00:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/modifying-page-tables.html</loc>
+    <lastmod>2015-12-09T00:00:00+00:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/allocating-frames.html</loc>
+    <lastmod>2015-11-15T00:00:00+00:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/printing-to-screen.html</loc>
+    <lastmod>2015-10-23T00:00:00+00:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/set-up-rust.html</loc>
+    <lastmod>2015-09-02T00:00:00+00:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/entering-longmode.html</loc>
+    <lastmod>2015-08-25T00:00:00+00:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/multiboot-kernel.html</loc>
+    <lastmod>2015-08-18T00:00:00+00:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/contact.html</loc>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/cross-compile-binutils.html</loc>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/cross-compile-libcore.html</loc>
+  </url>
+  
+  <url>
+    <loc>http://os.phil-opp.com/set-up-gdb.html</loc>
+  </url>
+  
+</urlset>
