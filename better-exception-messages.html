@@ -133,14 +133,14 @@
 <span class="p">}</span><span class="w"></span>
 </code></pre></div>
 
-<p>We&rsquo;re using <a href="https://doc.rust-lang.org/book/inline-assembly.html">inline assembly</a> here to load the value from the <code>rsp</code> register into <code>stack_frame</code>. The syntax is a bit strange, so here&rsquo;s a quick explanation:</p>
+<p>We&rsquo;re using <a href="https://doc.rust-lang.org/nightly/book/inline-assembly.html">inline assembly</a> here to load the value from the <code>rsp</code> register into <code>stack_frame</code>. The syntax is a bit strange, so here&rsquo;s a quick explanation:</p>
 
 <ul>
 <li>The <code>asm!</code> macro emits raw assembly instructions. This is the only way to read raw register values in Rust.</li>
 <li>We insert a single assembly instruction: <code>mov $0, rsp</code>. It moves the value of <code>rsp</code> to some register (the <code>$0</code> is a placeholder for an arbitrary register, which gets filled by the compiler).</li>
 <li>The colons are separators. After the first colon, the <code>asm!</code> macro expects output operands. We&rsquo;re specifying our <code>stack_frame</code> variable as a single output operand here. The <code>=r</code> tells the compiler that it should use any register for the first placeholder <code>$0</code>.</li>
 <li>After the second colon, we can specify input operands. We don&rsquo;t need any, therefore we leave it empty.</li>
-<li>After the third colon, the macro expects so called <a href="https://doc.rust-lang.org/book/inline-assembly.html#clobbers">clobbers</a>. We don&rsquo;t change any register values, so we leave it empty too.</li>
+<li>After the third colon, the macro expects so called <a href="https://doc.rust-lang.org/nightly/book/inline-assembly.html#clobbers">clobbers</a>. We don&rsquo;t change any register values, so we leave it empty too.</li>
 <li>The last block (after the 4th colon) specifies options. The <code>intel</code> option tells the compiler that our code is in Intel assembly syntax (instead of the default AT&amp;T syntax).</li>
 </ul>
 

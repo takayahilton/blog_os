@@ -76,14 +76,14 @@
 &lt;span class=&#34;p&#34;&gt;}&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
-&lt;p&gt;We&amp;rsquo;re using &lt;a href=&#34;https://doc.rust-lang.org/book/inline-assembly.html&#34;&gt;inline assembly&lt;/a&gt; here to load the value from the &lt;code&gt;rsp&lt;/code&gt; register into &lt;code&gt;stack_frame&lt;/code&gt;. The syntax is a bit strange, so here&amp;rsquo;s a quick explanation:&lt;/p&gt;
+&lt;p&gt;We&amp;rsquo;re using &lt;a href=&#34;https://doc.rust-lang.org/nightly/book/inline-assembly.html&#34;&gt;inline assembly&lt;/a&gt; here to load the value from the &lt;code&gt;rsp&lt;/code&gt; register into &lt;code&gt;stack_frame&lt;/code&gt;. The syntax is a bit strange, so here&amp;rsquo;s a quick explanation:&lt;/p&gt;
 
 &lt;ul&gt;
 &lt;li&gt;The &lt;code&gt;asm!&lt;/code&gt; macro emits raw assembly instructions. This is the only way to read raw register values in Rust.&lt;/li&gt;
 &lt;li&gt;We insert a single assembly instruction: &lt;code&gt;mov $0, rsp&lt;/code&gt;. It moves the value of &lt;code&gt;rsp&lt;/code&gt; to some register (the &lt;code&gt;$0&lt;/code&gt; is a placeholder for an arbitrary register, which gets filled by the compiler).&lt;/li&gt;
 &lt;li&gt;The colons are separators. After the first colon, the &lt;code&gt;asm!&lt;/code&gt; macro expects output operands. We&amp;rsquo;re specifying our &lt;code&gt;stack_frame&lt;/code&gt; variable as a single output operand here. The &lt;code&gt;=r&lt;/code&gt; tells the compiler that it should use any register for the first placeholder &lt;code&gt;$0&lt;/code&gt;.&lt;/li&gt;
 &lt;li&gt;After the second colon, we can specify input operands. We don&amp;rsquo;t need any, therefore we leave it empty.&lt;/li&gt;
-&lt;li&gt;After the third colon, the macro expects so called &lt;a href=&#34;https://doc.rust-lang.org/book/inline-assembly.html#clobbers&#34;&gt;clobbers&lt;/a&gt;. We don&amp;rsquo;t change any register values, so we leave it empty too.&lt;/li&gt;
+&lt;li&gt;After the third colon, the macro expects so called &lt;a href=&#34;https://doc.rust-lang.org/nightly/book/inline-assembly.html#clobbers&#34;&gt;clobbers&lt;/a&gt;. We don&amp;rsquo;t change any register values, so we leave it empty too.&lt;/li&gt;
 &lt;li&gt;The last block (after the 4th colon) specifies options. The &lt;code&gt;intel&lt;/code&gt; option tells the compiler that our code is in Intel assembly syntax (instead of the default AT&amp;amp;T syntax).&lt;/li&gt;
 &lt;/ul&gt;
 
