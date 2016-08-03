@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <meta http-equiv="X-Frame-Options" content="sameorigin">
+  
+  
+
+  <title>
+    Better Exception Messages &middot; Writing an OS in Rust
+  </title>
+
+  <link rel="canonical" href="http://os.phil-opp.com/better-exception-messages.html">
+
+  
+  <link rel="stylesheet" href="/css/poole.css">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/syntax.css">
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/images/apple-touch-icon-precomposed.png">
+  <link rel="shortcut icon" href="/images/favicon.ico">
+
+  
+
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/anchor-js/2.0.0/anchor.min.js"></script>
+  <script src="js/toc.min.js"></script>
+  <script src="js/main.js"></script>
+  <script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','https://www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-65296949-1', 'auto');
+  ga('send', 'pageview');
+
+</script>
+
+
+  
+  <script type="text/javascript">
+    if (window.location.hostname == "phil-opp.github.io") {
+      window.location.href = "http://os.phil-opp.com/";
+    }
+  </script>
+</head>
+
+<body>
+<div class="container content">
+
+<header class="masthead">
+  <h3 class="masthead-title">
+    <a href="/" title="Home">Writing an OS in Rust</a>
+    <span class="navigation">
+      <small><a href="/atom.xml"><img src="/images/feed-icon.png" alt="RSS"></a></small>
+    </span>
+    <small>Philipp&nbsp;Oppermann's&nbsp;blog</small>
+  </h3>
+</header>
+
+<main>
+
+
+<article class="post">
+  <h1 class="post-title">Better Exception Messages</h1>
+  <time datetime="2016-08-03" class="post-date">
+    Aug 3, 2016
+    
+  </time>
+
+  
+
+<p>In this post, we explore exceptions in more detail. Our goal is to print additional information when an exception occurs, for example the values of the instruction and stack pointer. In the course of this, we will explore inline assembly and naked functions. We will also add a handler function for page faults and read the associated error code.</p>
+
+<aside id="toc"></aside>
+
+<p>As always, the complete source code is on <a href="https://github.com/phil-opp/blog_os/tree/better_exception_messages">Github</a>. Please file <a href="https://github.com/phil-opp/blog_os/issues">issues</a> for any problems, questions, or improvement suggestions. There is also a <a href="#disqus_thread">comment section</a> at the end of this page.</p>
+
+<h2 id="exceptions-in-detail">Exceptions in Detail</h2>
+
+<p>An exception signals that something is wrong with the currently-executed instruction. Whenever an exception occurs, the CPU interrupts its current work and starts an internal exception routine.</p>
+
+<p>This routine involves reading the interrupt descriptor table and invoking the registered handler function. But first, the CPU pushes various information onto the stack, which describe the current state and provide information about the cause of the exception:</p>
+
+<p><img src="images/exception-stack-frame.svg" alt="exception stack frame" /></p>
+
+<p>The pushed information contain the instruction and stack pointer, the current CPU flags, and (for some exceptions) an error code, which contains further information about the cause of the exception. Let&rsquo;s look at the fields in detail:</p>
+
+<ul>
+<li>First, the CPU aligns the stack pointer on a 16-byte boundary. This allows the handler function to use SSE instructions, which partly expect such an alignment.</li>
+<li>After that, the CPU pushes the stack segment descriptor (SS) and the old stack pointer (from before the alignment) onto the stack. This allows us to restore the previous stack pointer when we want to resume the interrupted program.</li>
+<li>Then the CPU pushes the contents of the <a href="https://en.wikipedia.org/wiki/FLAGS_register">RFLAGS</a> register. This register contains various state information of the interrupted program. For example, it indicates if interrupts were enabled and whether the last executed instruction returned zero.</li>
+<li>Next the CPU pushes the instruction pointer and its code segment descriptor onto the stack. This tells us the address of the last executed instruction, which caused the exception.</li>
+<li>Finally, the CPU pushes an error code for some exceptions. This error code only exists for exceptions such as page faults or general protection faults and provides additional information. For example, it tells us whether a page fault was caused by a read or a write request.</li>
+</ul>
+
+<h2 id="printing-the-exception-stack-frame">Printing the Exception Stack Frame</h2>
+
+<p>Let&rsquo;s create a struct that represents the exception stack frame:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="cp">#[derive(Debug)]</span><span class="w"></span>
+<span class="cp">#[repr(C)]</span><span class="w"></span>
+<span class="k">struct</span><span class="w"> </span><span class="n">ExceptionStackFrame</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">instruction_pointer</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">code_segment</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">cpu_flags</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">stack_pointer</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">stack_segment</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The divide-by-zero fault pushes no error code, so we leave it out for now. Note that the stack grows downwards in memory, so we need to declare the fields in reverse order (compared to the figure above).</p>
+
+<p>Now we need a way to find the memory address of this stack frame. When we look at the above graphic again, we see that the start address of the exception stack frame is the new stack pointer. So we just need to read the value of <code>rsp</code> at the very beginning of our handler function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">divide_by_zero_handler</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">stack_frame</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">ExceptionStackFrame</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">asm</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;mov $0, rsp&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;=r&quot;</span><span class="p">(</span><span class="n">stack_frame</span><span class="p">)</span><span class="w"> </span><span class="o">:::</span><span class="w"> </span><span class="s">&quot;intel&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">print_error</span><span class="p">(</span><span class="n">format_args</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;EXCEPTION: DIVIDE BY ZERO</span><span class="se">\n</span><span class="s">{:#?}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="o">*</span><span class="n">stack_frame</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We&rsquo;re using <a href="https://doc.rust-lang.org/book/inline-assembly.html">inline assembly</a> here to load the value from the <code>rsp</code> register into <code>stack_frame</code>. The syntax is a bit strange, so here&rsquo;s a quick explanation:</p>
+
+<ul>
+<li>The <code>asm!</code> macro emits raw assembly instructions. This is the only way to read raw register values in Rust.</li>
+<li>We insert a single assembly instruction: <code>mov $0, rsp</code>. It moves the value of <code>rsp</code> to some register (the <code>$0</code> is a placeholder for an arbitrary register, which gets filled by the compiler).</li>
+<li>The colons are separators. After the first colon, the <code>asm!</code> macro expects output operands. We&rsquo;re specifying our <code>stack_frame</code> variable as a single output operand here. The <code>=r</code> tells the compiler that it should use any register for the first placeholder <code>$0</code>.</li>
+<li>After the second colon, we can specify input operands. We don&rsquo;t need any, therefore we leave it empty.</li>
+<li>After the third colon, the macro expects so called <a href="https://doc.rust-lang.org/book/inline-assembly.html#clobbers">clobbers</a>. We don&rsquo;t change any register values, so we leave it empty too.</li>
+<li>The last block (after the 4th colon) specifies options. The <code>intel</code> option tells the compiler that our code is in Intel assembly syntax (instead of the default AT&amp;T syntax).</li>
+</ul>
+
+<p>So the inline assembly loads the stack pointer value to <code>stack_frame</code> at the very beginning of our function. Thus we have a pointer to the exception stack frame and are able to pretty-print its <code>Debug</code> formatting through the <code>{:#?}</code> argument.</p>
+
+<h3 id="testing-it">Testing it</h3>
+
+<p>Let&rsquo;s try it by executing <code>make run</code>:</p>
+
+<p><img src="images/qemu-print-stack-frame-try.png" alt="qemu printing an ExceptionStackFrame with strange values" /></p>
+
+<p>Those <code>ExceptionStackFrame</code> values look very wrong. The instruction pointer definitely shouldn&rsquo;t be 1 and the code segment should be <code>0x8</code> instead of some big number. So what&rsquo;s going on here?</p>
+
+<h3 id="debugging">Debugging</h3>
+
+<p>It seems like we somehow got the pointer wrong. The <code>ExceptionStackFrame</code> type and our inline assembly seem correct, so something must be modifying <code>rsp</code> before we load it into <code>stack_frame</code>.</p>
+
+<p>Let&rsquo;s see what&rsquo;s happening by looking at the disassembly of our function:</p>
+
+<pre><code>&gt; objdump -d build/kernel-x86_64.bin | grep -A20 &quot;divide_by_zero_handler&quot;
+
+ [...]
+000000000010ced0 &lt;_ZN7blog_os10interrupts22divide_by_zero_handler17h62189e8E&gt;:
+ 10ced0:	55                   	push   %rbp
+ 10ced1:	48 89 e5             	mov    %rsp,%rbp
+ 10ced4:	48 81 ec b0 00 00 00 	sub    $0xb0,%rsp
+ 10cedb:	48 8d 45 98          	lea    -0x68(%rbp),%rax
+ 10cedf:	48 b9 1d 1d 1d 1d 1d 	movabs $0x1d1d1d1d1d1d1d1d,%rcx
+ 10cee6:	1d 1d 1d
+ 10cee9:	48 89 4d 98          	mov    %rcx,-0x68(%rbp)
+ 10ceed:	48 89 4d f8          	mov    %rcx,-0x8(%rbp)
+ 10cef1:	48 89 e1             	mov    %rsp,%rcx
+ 10cef4:	48 89 4d f8          	mov    %rcx,-0x8(%rbp)
+ 10cef8:  ...
+[...]
+</code></pre>
+
+<p>Our <code>divide_by_zero_handler</code> starts at address <code>0x10ced0</code>. Let&rsquo;s look at the instruction at address <code>0x10cef1</code>:</p>
+
+<pre><code>mov %rsp,%rcx
+</code></pre>
+
+<p>This is our inline assembly instruction, which loads the stack pointer into the <code>stack_frame</code> variable. It just looks a bit different, since it&rsquo;s in AT&amp;T syntax and contains <code>rcx</code> instead of our <code>$0</code> placeholder. It moves <code>rsp</code> to <code>rcx</code>, and then the next instruction (<code>mov %rcx,-0x8(%rbp)</code>) moves <code>rcx</code> to the variable on the stack.</p>
+
+<p>We can clearly see the problem here: The compiler inserted various other instructions before our inline assembly. These instructions modify the stack pointer so that we don&rsquo;t read the original <code>rsp</code> value and get a wrong pointer. But why is the compiler doing this?</p>
+
+<p>The reason is that we need some place on the stack to store things like variables. Therefore the compiler inserts a so-called <em><a href="https://en.wikipedia.org/wiki/Function_prologue">function prologue</a></em>, which prepares the stack and reserves space for all variables. In our case, the compiler subtracts from the stack pointer to make room for i.a. our <code>stack_frame</code> variable. This prologue is the first thing in every function and comes before every other code.</p>
+
+<p>So in order to correctly load the exception frame pointer, we need some way to circumvent the automatic prologue generation.</p>
+
+<h3 id="naked-functions">Naked Functions</h3>
+
+<p>Fortunately there is a way to disable the prologue: <a href="https://github.com/rust-lang/rfcs/blob/master/text/1201-naked-fns.md">naked functions</a>. A naked function has no prologue and immediately starts with the first instruction of its body. However, most Rust code requires the prologue. Therefore naked functions should only contain inline assembly.</p>
+
+<p>A naked function looks like this (note the <code>#[naked]</code> attribute):</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[naked]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">naked_function_example</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">asm</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;mov rax, 0x42&quot;</span><span class="w"> </span><span class="o">:::</span><span class="w"> </span><span class="s">&quot;rax&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;intel&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Naked functions are highly unstable, so we need to add <code>#![feature(naked_functions)]</code> to our <code>src/lib.rs</code>.</p>
+
+<p>If you want to try it, insert it in <code>src/lib.rs</code> and call it from <code>rust_main</code>. When we inspect the disassembly, we see that the function prologue is missing:</p>
+
+<pre><code>&gt; objdump -d build/kernel-x86_64.bin | grep -A5 &quot;naked_function_example&quot;
+[...]
+000000000010df90 &lt;_ZN7blog_os22naked_function_example17ha9f733dfe42b595dE&gt;:
+  10df90:	48 c7 c0 2a 00 00 00 	mov    $0x42,%rax
+  10df97:	c3                   	retq   
+  10df98:	0f 1f 84 00 00 00 00 	nopl   0x0(%rax,%rax,1)
+  10df9f:	00
+</code></pre>
+
+<p>It contains just the specified inline assembly and a return instruction (you can ignore the junk values after the return statement). So let&rsquo;s try to use a naked function to retrieve the exception frame pointer.</p>
+
+<h3 id="a-naked-exception-handler">A Naked Exception Handler</h3>
+
+<p>We can&rsquo;t use Rust code in naked functions, but we still want to use Rust in our exception handler. Therefore we split our handler function in two parts. A main exception handler in Rust and a small naked wrapper function, which just loads the exception frame pointer and then calls the main handler.</p>
+
+<p>Our new two-stage exception handler looks like this:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="cp">#[naked]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">divide_by_zero_wrapper</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">asm</span><span class="o">!</span><span class="p">(</span><span class="cm">/* load exception frame pointer and call main handler */</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">divide_by_zero_handler</span><span class="p">(</span><span class="n">stack_frame</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">ExceptionStackFrame</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">print_error</span><span class="p">(</span><span class="n">format_args</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;EXCEPTION: DIVIDE BY ZERO</span><span class="se">\n</span><span class="s">{:#?}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="o">*</span><span class="n">stack_frame</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The naked wrapper function retrieves the exception stack frame pointer and then calls the <code>divide_by_zero_handler</code> with the pointer as argument. We can&rsquo;t use Rust code in naked functions, so we need to do both things in inline assembly.</p>
+
+<p>Retrieving the pointer to the exception stack frame is easy: We just need to load it from the <code>rsp</code> register. Our wrapper function has no prologue (it&rsquo;s naked), so we can be sure that nothing modifies the register before.</p>
+
+<p>Calling the main handler is a bit more complicated, since we need to pass the argument correctly. Our main handler uses the C calling convention, which specifies that the the first argument is passed in the <code>rdi</code> register. So we need to load the pointer value into <code>rdi</code> and then use the <code>call</code> instruction to call <code>divide_by_zero_handler</code>.</p>
+
+<p>Translated to assembly, it looks like this:</p>
+<div class="highlight"><pre><code class="language-nasm" data-lang="nasm"><span></span><span class="nf">mov</span> <span class="nb">rdi</span><span class="p">,</span> <span class="nb">rsp</span>
+<span class="nf">call</span> <span class="nb">di</span><span class="nv">vide_by_zero_handler</span>
+</code></pre></div>
+
+<p>It moves the exception stack frame pointer from <code>rsp</code> to <code>rdi</code>, where the first argument is expected, and then calls the main handler. Let&rsquo;s create the corresponding inline assembly to complete our wrapper function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[naked]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">divide_by_zero_wrapper</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">asm</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;mov rdi, rsp; call $0&quot;</span><span class="w"></span>
+<span class="w">             </span><span class="o">::</span><span class="w"> </span><span class="s">&quot;i&quot;</span><span class="p">(</span><span class="n">divide_by_zero_handler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="p">(</span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="p">)</span><span class="w"></span>
+<span class="w">             </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;rdi&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;intel&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Instead of <code>call divide_by_zero_handler</code>, we use a placeholder again. The reason is Rust&rsquo;s name mangling, which changes the name of the <code>divide_by_zero_handler</code> function. To circumvent this, we pass a function pointer as input parameter (after the second colon). The <code>&quot;i&quot;</code> tells the compiler that it is an immediate value, which can be directly inserted for the placeholder. We also specify a clobber after the third colon, which tells the compiler that we change the value of the <code>rdi</code> register.</p>
+
+<h3 id="intrinsics-unreachable">Intrinsics::Unreachable</h3>
+
+<p>When we try to compile it, we get the following error:</p>
+
+<pre><code>error: computation may converge in a function marked as diverging
+  --&gt; src/interrupts/mod.rs:23:1
+   |&gt;
+23 |&gt; extern &quot;C&quot; fn divide_by_zero_wrapper() -&gt; ! {
+   |&gt; ^
+</code></pre>
+
+<p>The reason is that we marked our <code>divide_by_zero_wrapper</code> function as diverging (the <code>!</code>). We call another diverging function in inline assembly, so it is clear that the function diverges. However, the Rust compiler doesn&rsquo;t understand inline assembly, so it doesn&rsquo;t know that. To fix this, we tell the compiler that all code after the <code>asm!</code> macro is unreachable:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[naked]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">divide_by_zero_wrapper</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">asm</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;mov rdi, rsp; call $0&quot;</span><span class="w"></span>
+<span class="w">             </span><span class="o">::</span><span class="w"> </span><span class="s">&quot;i&quot;</span><span class="p">(</span><span class="n">divide_by_zero_handler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="p">(</span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="p">)</span><span class="w"></span>
+<span class="w">             </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;rdi&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;intel&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="o">::</span><span class="n">core</span><span class="o">::</span><span class="n">intrinsics</span><span class="o">::</span><span class="n">unreachable</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <a href="https://doc.rust-lang.org/nightly/core/intrinsics/fn.unreachable.html">intrinsics::unreachable</a> function is unstable, so we need to add <code>#![feature(core_intrinsics)]</code> to our <code>src/lib.rs</code>. It is just an annotation for the compiler and produces no real code. (Not to be confused with the <a href="https://doc.rust-lang.org/nightly/core/macro.unreachable!.html">unreachable!</a> macro, which is completely different!)</p>
+
+<h3 id="it-works">It works!</h3>
+
+<p>The last step is to update the interrupt descriptor table (IDT) to use our new wrapper function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="n">lazy_static</span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">ref</span><span class="w"> </span><span class="n">IDT</span><span class="o">:</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="o">::</span><span class="n">new</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">divide_by_zero_wrapper</span><span class="p">);</span><span class="w"> </span><span class="c1">// changed</span>
+<span class="w">        </span><span class="n">idt</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Now we see a correct exception stack frame when we execute <code>make run</code>:</p>
+
+<p><img src="images/qemu-divide-by-zero-stack-frame.png" alt="QEMU showing correct divide by zero stack frame" /></p>
+
+<h2 id="testing-on-real-hardware">Testing on real Hardware</h2>
+
+<p>Virtual machines such as QEMU are very convenient to quickly test our kernel. However, they might behave a bit different than real hardware in some situations. So we should test our kernel on real hardware, too.</p>
+
+<p>Let&rsquo;s do it by burning it to an USB stick:</p>
+
+<pre><code>&gt; sudo dd if=build/os-x86_64.iso of=/dev/sdX; and sync
+</code></pre>
+
+<p>Replace <code>sdX</code> by the device name of your USB stick. But <strong>be careful</strong>! The command will erase everything on that device.</p>
+
+<p>When we boot from this USB stick now, we see that our computer reboots just before printing the exception message. So our code, which worked well in QEMU, <em>causes a triple fault</em> on real hardware. What&rsquo;s happening?</p>
+
+<h3 id="reproducing-the-bug-in-qemu">Reproducing the Bug in QEMU</h3>
+
+<p>Debugging on a real machine is difficult. Fortunately there is a way to reproduce this bug in QEMU: We use Linux&rsquo;s <a href="https://en.wikipedia.org/wiki/Kernel-based_Virtual_Machine">Kernel-based Virtual Machine</a> (KVM) by passing the <code>‑enable-kvm</code> flag:</p>
+
+<pre><code>&gt; qemu-system-x86_64 -cdrom build/os-x86_64.iso -enable-kvm
+</code></pre>
+
+<p>Now QEMU triple faults as well. This should make debugging much easier.</p>
+
+<h3 id="debugging-1">Debugging</h3>
+
+<p>QEMU&rsquo;s <code>-d int</code>, which prints every exception, doesn&rsquo;t seem to work in KVM mode. However <code>-d cpu_reset</code> still works. It prints the complete CPU state whenever the CPU resets. Let&rsquo;s try it:</p>
+
+<pre><code>&gt; qemu-system-x86_64 -cdrom build/os-x86_64.iso -enable-kvm -d cpu_reset
+CPU Reset (CPU 0)
+EAX=00000000 EBX=00000000 ECX=00000000 EDX=00000000
+ESI=00000000 EDI=00000000 EBP=00000000 ESP=00000000
+EIP=00000000 EFL=00000000 [-------] CPL=0 II=0 A20=0 SMM=0 HLT=0
+[...]
+CPU Reset (CPU 0)
+EAX=00000000 EBX=00000000 ECX=00000000 EDX=00000663
+ESI=00000000 EDI=00000000 EBP=00000000 ESP=00000000
+EIP=0000fff0 EFL=00000002 [-------] CPL=0 II=0 A20=1 SMM=0 HLT=0
+[...]
+CPU Reset (CPU 0)
+RAX=0000000000118cb8 RBX=0000000000000800 RCX=1d1d1d1d1d1d1d1d RDX=0..0000000
+RSI=0000000000112cd0 RDI=0000000000118d38 RBP=0000000000118d28 RSP=0..0118c68
+R8 =0000000000000000 R9 =0000000000000100 R10=0000000000118700 R11=0..0118a00
+R12=0000000000000000 R13=0000000000000000 R14=0000000000000000 R15=0..0000000
+RIP=000000000010cf08 RFL=00210002 [-------] CPL=0 II=0 A20=1 SMM=0 HLT=0
+[...]
+</code></pre>
+
+<p>The first two resets occur while the CPU is still in 32-bit mode (<code>EAX</code> instead of <code>RAX</code>), so we ignore them. The third reset is the interesting one, because it occurs in 64-bit mode. The register dump tells us that the instruction pointer (<code>rip</code>) was <code>0x10cf08</code> just before the reset. This might be the address of the instruction that caused the triple fault.</p>
+
+<p>We can find the corresponding instruction by disassembling our kernel:</p>
+
+<pre><code>objdump -d build/kernel-x86_64.bin | grep &quot;10cf08:&quot;
+  10cf08:	0f 29 45 b0          	movaps %xmm0,-0x50(%rbp)
+</code></pre>
+
+<p>The <a href="http://x86.renejeschke.de/html/file_module_x86_id_180.html">movaps</a> instruction is an <a href="https://en.wikipedia.org/wiki/Streaming_SIMD_Extensions">SSE</a> instruction that moves aligned 128bit values. It can fail for a number of reasons:</p>
+
+<ol>
+<li>For an illegal memory operand effective address in the CS, DS, ES, FS or GS segments.</li>
+<li>For an illegal address in the SS segment.</li>
+<li>If a memory operand is not aligned on a 16-byte boundary.</li>
+<li>For a page fault.</li>
+<li>If TS in CR0 is set.</li>
+</ol>
+
+<p>The segment registers contain no meaningful values in long mode, so they can&rsquo;t contain illegal addresses. We did not change the TS bit in <a href="https://en.wikipedia.org/wiki/Control_register#CR0">CR0</a> and there is no reason for a page fault either. So it has to be option 3.</p>
+
+<h3 id="16-byte-alignment">16-byte Alignment</h3>
+
+<p>Some SSE instructions such as <code>movaps</code> require that memory operands are 16-byte aligned. In our case, the instruction is <code>movaps %xmm0,-0x50(%rbp)</code>, which writes to address <code>rbp - 0x50</code>. Therefore <code>rbp</code> needs to be 16-byte aligned.</p>
+
+<p>Let&rsquo;s look at the above <code>-d cpu_reset</code> dump again and check the value of <code>rbp</code>:</p>
+
+<pre><code>CPU Reset (CPU 0)
+RAX=[...] RBX=[...] RCX=[...] RDX=[...]
+RSI=[...] RDI=[...] RBP=0000000000118d28 RSP=[...]
+...
+</code></pre>
+
+<p><code>RBP</code> is <code>0x118d28</code>, which is <em>not</em> 16-byte aligned. So this is the reason for the triple fault. (It seems like QEMU doesn&rsquo;t check the alignment for <code>movaps</code>, but real hardware of course does.)</p>
+
+<p>But how did we end up with a misaligned <code>rbp</code> register?</p>
+
+<h3 id="the-base-pointer">The Base Pointer</h3>
+
+<p>In order to solve this mystery, we need to look at the disassembly of the preceding code:</p>
+
+<pre><code>&gt; objdump -d build/kernel-x86_64.bin | grep -B10 &quot;10cf08:&quot;
+000000000010cee0 &lt;_ZN7blog_os10interrupts22divide_by_zero_handler17hE&gt;:
+  10cee0:	55                   	push   %rbp
+  10cee1:	48 89 e5             	mov    %rsp,%rbp
+  10cee4:	48 81 ec c0 00 00 00 	sub    $0xc0,%rsp
+  10ceeb:	48 8d 45 90          	lea    -0x70(%rbp),%rax
+  10ceef:	48 b9 1d 1d 1d 1d 1d 	movabs $0x1d1d1d1d1d1d1d1d,%rcx
+  10cef6:	1d 1d 1d
+  10cef9:	48 89 4d 90          	mov    %rcx,-0x70(%rbp)
+  10cefd:	48 89 7d f8          	mov    %rdi,-0x8(%rbp)
+  10cf01:	0f 10 05 a8 51 00 00 	movups 0x51a8(%rip),%xmm0
+  10cf08:	0f 29 45 b0          	movaps %xmm0,-0x50(%rbp)
+</code></pre>
+
+<p>At the last line we have the <code>movaps</code> instruction, which caused the triple fault. The exception occurs inside our <code>divide_by_zero_handler</code> function. We see that <code>rbp</code> is loaded with the value of <code>rsp</code> at the beginning (at <code>0x10cee1</code>). The <code>rbp</code> register holds the so-called <em>base pointer</em>, which points to the beginning of the stack frame. It is used in the rest of the function to address variables and other values on the stack.</p>
+
+<p>The base pointer is initialized directly from the stack pointer (<code>rsp</code>) after pushing the old base pointer. There is no special alignment code, so the compiler blindly assumes that <code>(rsp - 8)</code><sup class="footnote-ref" id="fnref:fn-rsp-8"><a rel="footnote" href="#fn:fn-rsp-8">1</a></sup> is always 16-byte aligned. This seems to be wrong in our case. But why does the compiler assume this?</p>
+
+<h3 id="calling-conventions">Calling Conventions</h3>
+
+<p>The reason is that our exception handler is defined as <code>extern &quot;C&quot; function</code>, which specifies that it&rsquo;s using the C <a href="https://en.wikipedia.org/wiki/X86_calling_conventions">calling convention</a>. On x86_64 Linux, the C calling convention is specified by the System V AMD64 ABI (<a href="http://www.x86-64.org/documentation/abi.pdf">PDF</a>). Section 3.2.2 defines the following:</p>
+
+<blockquote>
+<p>The end of the input argument area shall be aligned on a 16 byte boundary. In other words, the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point.</p>
+</blockquote>
+
+<p>The “end of the input argument area” refers to the last stack-passed argument (in our case there aren&rsquo;t any). So the stack pointer must be 16 byte aligned whenever we <code>call</code> a C-compatible function. The <code>call</code> instruction then pushes the return value on the stack so that “the value (%rsp + 8) is a multiple of 16 when control is transferred to the function entry point”.</p>
+
+<p><em>Summary</em>: The calling convention requires a 16 byte aligned stack pointer before <code>call</code> instructions. The compiler relies on this requirement, but we broke it somehow. Thus the generated code triple faults due to a misaligned memory address in the <code>movaps</code> instruction.</p>
+
+<h3 id="fixing-the-alignment">Fixing the Alignment</h3>
+
+<p>In order to fix this bug, we need to make sure that the stack pointer is correctly aligned before calling <code>extern &quot;C&quot;</code> functions. Let&rsquo;s summarize the stack pointer modifications that occur before the exception handler is called:</p>
+
+<ol>
+<li>The CPU aligns the stack pointer to a 16 byte boundary.</li>
+<li>The CPU pushes <code>ss</code>, <code>rsp</code>, <code>rflags</code>, <code>cs</code>, and <code>rip</code>. So it pushes five 8 byte registers, which makes <code>rsp</code> misaligned.</li>
+<li>The wrapper function calls <code>divide_by_zero_handler</code> with a misaligned stack pointer.</li>
+</ol>
+
+<p>The problem is that we&rsquo;re pushing an uneven number of 8 byte registers. Thus we need to align the stack pointer again before the <code>call</code> instruction:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="cp">#[naked]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">divide_by_zero_wrapper</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">asm</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;mov rdi, rsp</span>
+<span class="s">              sub rsp, 8 // align the stack pointer</span>
+<span class="s">              call $0&quot;</span><span class="w"></span>
+<span class="w">              </span><span class="o">::</span><span class="w"> </span><span class="s">&quot;i&quot;</span><span class="p">(</span><span class="n">divide_by_zero_handler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="p">(</span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="p">)</span><span class="w"></span>
+<span class="w">              </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;rdi&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;intel&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="o">::</span><span class="n">core</span><span class="o">::</span><span class="n">intrinsics</span><span class="o">::</span><span class="n">unreachable</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The additional <code>sub rsp, 8</code> instruction aligns the stack pointer to a 16 byte boundary. Now it should work on real hardware (and in QEMU KVM mode) again.</p>
+
+<h2 id="a-handler-macro">A Handler Macro</h2>
+
+<p>The next step is to add handlers for other exceptions. However, we would need wrapper functions for them too. To avoid this code duplication, we create a <code>handler</code> macro that creates the wrapper functions for us:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="n">macro_rules</span><span class="o">!</span><span class="w"> </span><span class="n">handler</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="cp">$name</span><span class="o">:</span><span class="w"> </span><span class="n">ident</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{{</span><span class="w"></span>
+<span class="w">        </span><span class="cp">#[naked]</span><span class="w"></span>
+<span class="w">        </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">wrapper</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">asm</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;mov rdi, rsp</span>
+<span class="s">                      sub rsp, 8 // align the stack pointer</span>
+<span class="s">                      call $0&quot;</span><span class="w"></span>
+<span class="w">                      </span><span class="o">::</span><span class="w"> </span><span class="s">&quot;i&quot;</span><span class="p">(</span><span class="cp">$name</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="p">(</span><span class="w"></span>
+<span class="w">                          </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">ExceptionStackFrame</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="p">)</span><span class="w"></span>
+<span class="w">                      </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;rdi&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;intel&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="o">::</span><span class="n">core</span><span class="o">::</span><span class="n">intrinsics</span><span class="o">::</span><span class="n">unreachable</span><span class="p">();</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="n">wrapper</span><span class="w"></span>
+<span class="w">    </span><span class="p">}}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The macro takes a single Rust identifier (<code>ident</code>) as argument and expands to a <code>{}</code> block (hence the double braces). The block defines a new wrapper function that calls the function <code>$name</code> and passes a pointer to the exception stack frame. Note that we&rsquo;re fixing the argument type to <code>*const ExceptionStackFrame</code>. If we used a <code>_</code> like before, the passed function could accept an arbitrary argument, which would lead to ugly bugs at runtime.</p>
+
+<p>Now we can use remove the <code>divide_by_zero_wrapper</code> and use our new <code>handler!</code> macro instead:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="n">lazy_static</span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">ref</span><span class="w"> </span><span class="n">IDT</span><span class="o">:</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="o">::</span><span class="n">new</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">handler</span><span class="o">!</span><span class="p">(</span><span class="n">divide_by_zero_handler</span><span class="p">));</span><span class="w"> </span><span class="c1">// new</span>
+<span class="w">        </span><span class="n">idt</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Note that the <code>handler!</code> macro needs to be defined above the static <code>IDT</code>, because macros are only available after their definition.</p>
+
+<h3 id="invalid-opcode-exception">Invalid Opcode Exception</h3>
+
+<p>With the <code>handler!</code> macro we can create new handler functions easily. For example, we can add a handler for the invalid opcode exception as follows:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="n">lazy_static</span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">ref</span><span class="w"> </span><span class="n">IDT</span><span class="o">:</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="o">::</span><span class="n">new</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">handler</span><span class="o">!</span><span class="p">(</span><span class="n">divide_by_zero_handler</span><span class="p">));</span><span class="w"></span>
+<span class="w">        </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span><span class="w"> </span><span class="n">handler</span><span class="o">!</span><span class="p">(</span><span class="n">invalid_opcode_handler</span><span class="p">));</span><span class="w"> </span><span class="c1">// new</span>
+<span class="w">        </span><span class="n">idt</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">invalid_opcode_handler</span><span class="p">(</span><span class="n">stack_frame</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">ExceptionStackFrame</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">print_error</span><span class="p">(</span><span class="n">format_args</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;EXCEPTION: INVALID OPCODE at {:#x}</span><span class="se">\n</span><span class="s">{:#?}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="p">(</span><span class="o">*</span><span class="n">stack_frame</span><span class="p">).</span><span class="n">instruction_pointer</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">stack_frame</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Invalid opcode faults have the vector number 6, so we set the 6th IDT entry. This time we additionally print the address of the invalid instruction.</p>
+
+<p>We can test our new handler with the special <a href="http://x86.renejeschke.de/html/file_module_x86_id_318.html">ud2</a> instruction, which generates a invalid opcode:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(</span><span class="n">multiboot_information_address</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// initialize our IDT</span>
+<span class="w">    </span><span class="n">interrupts</span><span class="o">::</span><span class="n">init</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// provoke a invalid opcode exception</span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">asm</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;ud2&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<h2 id="exceptions-with-error-codes">Exceptions with Error Codes</h2>
+
+<p>When a divide-by-zero exception occurs, we immediately know the reason: Someone tried to divide by zero. In contrast, there are faults with many possible causes. For example, a page fault occurs in many occasions: When accessing a non-present page, when writing to a read-only page, when the page table is malformed, etc. In order to differentiate these causes, the CPU pushes an additional error code onto the stack for such exceptions, which gives additional information.</p>
+
+<h3 id="a-new-macro">A new Macro</h3>
+
+<p>Since the CPU pushes an additional error code, the stack frame is different and our <code>handler!</code> macro is not applicable. Therefore we create a new <code>handler_with_error_code!</code> macro for them:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="n">macro_rules</span><span class="o">!</span><span class="w"> </span><span class="n">handler_with_error_code</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="cp">$name</span><span class="o">:</span><span class="w"> </span><span class="n">ident</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{{</span><span class="w"></span>
+<span class="w">        </span><span class="cp">#[naked]</span><span class="w"></span>
+<span class="w">        </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">wrapper</span><span class="p">()</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">asm</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;pop rsi // pop error code into rsi</span>
+<span class="s">                      mov rdi, rsp</span>
+<span class="s">                      sub rsp, 8 // align the stack pointer</span>
+<span class="s">                      call $0&quot;</span><span class="w"></span>
+<span class="w">                      </span><span class="o">::</span><span class="w"> </span><span class="s">&quot;i&quot;</span><span class="p">(</span><span class="cp">$name</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="p">(</span><span class="w"></span>
+<span class="w">                          </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">ExceptionStackFrame</span><span class="p">,</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="p">)</span><span class="w"></span>
+<span class="w">                      </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;rdi&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;intel&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="o">::</span><span class="n">core</span><span class="o">::</span><span class="n">intrinsics</span><span class="o">::</span><span class="n">unreachable</span><span class="p">();</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="n">wrapper</span><span class="w"></span>
+<span class="w">    </span><span class="p">}}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The difference to the <code>handler!</code> macro is the additional error code argument. The CPU pushes the error code last, so we pop it right at the beginning of the wrapper function. We pop it into <code>rsi</code> because the C calling convention expects the second argument in it.</p>
+
+<h3 id="a-page-fault-handler">A Page Fault Handler</h3>
+
+<p>Let&rsquo;s write a page fault handler which analyzes and prints the error code:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">(</span><span class="n">stack_frame</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">ExceptionStackFrame</span><span class="p">,</span><span class="w"></span>
+<span class="w">                                 </span><span class="n">error_code</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">print_error</span><span class="p">(</span><span class="n">format_args</span><span class="o">!</span><span class="p">(</span><span class="w"></span>
+<span class="w">            </span><span class="s">&quot;EXCEPTION: PAGE FAULT with error code {:?}</span><span class="se">\n</span><span class="s">{:#?}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">error_code</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">stack_frame</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We need to register our new handler function in the static interrupt descriptor table (IDT):</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="n">lazy_static</span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="k">ref</span><span class="w"> </span><span class="n">IDT</span><span class="o">:</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">idt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">idt</span><span class="o">::</span><span class="n">Idt</span><span class="o">::</span><span class="n">new</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">        </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">handler</span><span class="o">!</span><span class="p">(</span><span class="n">divide_by_zero_handler</span><span class="p">));</span><span class="w"></span>
+<span class="w">        </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span><span class="w"> </span><span class="n">handler</span><span class="o">!</span><span class="p">(</span><span class="n">invalid_opcode_handler</span><span class="p">));</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// new</span>
+<span class="w">        </span><span class="n">idt</span><span class="p">.</span><span class="n">set_handler</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="w"> </span><span class="n">handler_with_error_code</span><span class="o">!</span><span class="p">(</span><span class="n">page_fault_handler</span><span class="p">));</span><span class="w"></span>
+
+<span class="w">        </span><span class="n">idt</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>Page faults have the vector number 14, so we set the 14th IDT entry.</p>
+
+<h4 id="testing-it-1">Testing it</h4>
+
+<p>Let&rsquo;s test our new page fault handler by provoking a page fault in our main function:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+
+<span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">rust_main</span><span class="p">(</span><span class="n">multiboot_information_address</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">...</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// initialize our IDT</span>
+<span class="w">    </span><span class="n">interrupts</span><span class="o">::</span><span class="n">init</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// provoke a page fault</span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="mh">0xdeadbeaf</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">42</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;It did not crash!&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>We get the following output:</p>
+
+<p><img src="images/qemu-page-fault-handler.png" alt="QEMU: page fault with error code 2 and stack frame dump" /></p>
+
+<h3 id="the-page-fault-error-code">The Page Fault Error Code</h3>
+
+<p>“Error code 2” is not really an useful error message. Let&rsquo;s improve this by creating a <code>PageFaultErrorCode</code> type:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
+
+<span class="n">bitflags</span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">flags</span><span class="w"> </span><span class="n">PageFaultErrorCode</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">PROTECTION_VIOLATION</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">CAUSED_BY_WRITE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">USER_MODE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">MALFORMED_TABLE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">INSTRUCTION_FETCH</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<ul>
+<li>When the <code>PROTECTION_VIOLATION</code> flag is set, the page fault was caused e.g. by a write to a read-only page. If it&rsquo;s not set, it was caused by accessing a non-present page.</li>
+<li>The <code>CAUSED_BY_WRITE</code> flag specifies if the fault was caused by a write (if set) or a read (if not set).</li>
+<li>The <code>USER_MODE</code> flag is set when the fault occurred in non-priviledged mode.</li>
+<li>The <code>MALFORMED_TABLE</code> flag is set when the page table entry has a 1 in a reserved field.</li>
+<li>When the <code>INSTRUCTION_FETCH</code> flag is set, the page fault occurred while fetching the next instruction.</li>
+</ul>
+
+<p>Now we can improve our page fault error message by using the new <code>PageFaultErrorCode</code>. We also print the accessed memory address:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">page_fault_handler</span><span class="p">(</span><span class="n">stack_frame</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">ExceptionStackFrame</span><span class="p">,</span><span class="w"></span>
+<span class="w">                                 </span><span class="n">error_code</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">)</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="o">!</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kn">use</span><span class="w"> </span><span class="n">x86</span><span class="o">::</span><span class="n">controlregs</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">print_error</span><span class="p">(</span><span class="n">format_args</span><span class="o">!</span><span class="p">(</span><span class="w"></span>
+<span class="w">            </span><span class="s">&quot;EXCEPTION: PAGE FAULT while accessing {:#x}\</span>
+<span class="s">            </span><span class="se">\n</span><span class="s">error code: {:?}</span><span class="se">\n</span><span class="s">{:#?}&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">controlregs</span><span class="o">::</span><span class="n">cr2</span><span class="p">(),</span><span class="w"></span>
+<span class="w">            </span><span class="n">PageFaultErrorCode</span><span class="o">::</span><span class="n">from_bits</span><span class="p">(</span><span class="n">error_code</span><span class="p">).</span><span class="n">unwrap</span><span class="p">(),</span><span class="w"></span>
+<span class="w">            </span><span class="o">*</span><span class="n">stack_frame</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">loop</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+<p>The <code>from_bits</code> function tries to convert the <code>u64</code> into a <code>PageFaultErrorCode</code>. We use <code>unwrap</code> to panic if the error code has invalid bits set, since this indicates an error in our <code>PageFaultErrorCode</code> definition or a stack corruption. We also print the contents of the <code>cr2</code> register. It contains the accessed memory address, which was the cause of the page fault.</p>
+
+<p>Now we get a useful error message when a page fault occurs, which allows us to debug it more easily:</p>
+
+<p><img src="images/qemu-page-fault-error-code.png" alt="QEMU: output is now `PAGE FAULT with error code CAUSED_BY_WRITE`" /></p>
+
+<p>As expected, the page fault was caused by write to <code>0xdeadbeaf</code>. The <code>PROTECTION_VIOLATION</code> flag is not set, so the accessed page was not present.</p>
+
+<h2 id="what-s-next">What&rsquo;s next?</h2>
+
+<p>Now we&rsquo;re able to catch and analyze various exceptions. The next step is to <em>resolve</em> exceptions, if possible. An example is <a href="https://en.wikipedia.org/wiki/Demand_paging">demand paging</a>: The OS swaps out memory pages to disk so that a page fault occurs when the page is accessed the next time. In that case, the OS can resolve the exception by bringing the page back into memory. Afterwards, the OS resumes the interrupted program as if nothing had happened.</p>
+
+<p>The next post will implement the first portion of demand paging: saving and restoring the complete state of an program. This will allow us to transparently interrupt and resume programs in the future.</p>
+<div class="footnotes">
+
+<hr />
+
+<ol>
+<li id="fn:fn-rsp-8">By pushing the old base pointer, <code>rsp</code> is updated to <code>rsp-8</code>.
+ <a class="footnote-return" href="#fnref:fn-rsp-8"><sup>[return]</sup></a></li>
+</ol>
+</div>
+
+</article>
+
+<hr>
+<div class="PageNavigation">
+  
+    <a class="prev" href="/catching-exceptions.html">&laquo; Catching Exceptions</a>
+  
+  
+</div>
+<hr>
+
+<div id="disqus_thread"></div>
+<script>
+  (function() {
+    
+    
+    if (window.location.hostname == "localhost")
+        return;
+
+    var d = document, s = d.createElement('script');
+
+    s.src = '//phil-opp.disqus.com/embed.js';
+
+    s.setAttribute('data-timestamp', +new Date());
+    (d.head || d.body).appendChild(s);
+  })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript" rel="nofollow">comments powered by Disqus.</a></noscript>
+
+<script type="text/javascript">
+  anchors.options = {
+    placement: 'left',
+  };
+  anchors.add('article h2, article h3, article h4, article h5, article h6');
+</script>
+
+</main>
+
+<footer class="footer">
+  <small>
+    &copy;
+    <time datetime="2016">2016</time>. All rights reserved.
+    <a href="/contact.html">Contact</a>
+  </small>
+</footer>
+</div>
+
+</body>
+</html>
+
