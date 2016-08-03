@@ -24,7 +24,7 @@
 
 &lt;aside id=&#34;toc&#34;&gt;&lt;/aside&gt;
 
-&lt;p&gt;As always, the complete source code is on &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/better_exception_messages&#34;&gt;Github&lt;/a&gt;. Please file &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues&#34;&gt;issues&lt;/a&gt; for any problems, questions, or improvement suggestions. There is also a &lt;a href=&#34;#disqus_thread&#34;&gt;comment section&lt;/a&gt; at the end of this page.&lt;/p&gt;
+&lt;p&gt;As always, the complete source code is on &lt;a href=&#34;https://github.com/phil-opp/blog_os/tree/better_exception_messages&#34;&gt;Github&lt;/a&gt;. Please file &lt;a href=&#34;https://github.com/phil-opp/blog_os/issues&#34;&gt;issues&lt;/a&gt; for any problems, questions, or improvement suggestions. There is also a &lt;a href=&#34;https://gitter.im/phil-opp/blog_os&#34;&gt;gitter chat&lt;/a&gt; and a &lt;a href=&#34;#disqus_thread&#34;&gt;comment section&lt;/a&gt; at the end of this page.&lt;/p&gt;
 
 &lt;h2 id=&#34;exceptions-in-detail&#34;&gt;Exceptions in Detail&lt;/h2&gt;
 
