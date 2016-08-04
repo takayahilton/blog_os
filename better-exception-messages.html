@@ -479,7 +479,7 @@ RSI=[...] RDI=[...] RBP=0000000000118d28 RSP=[...]
 
 <p>The macro takes a single Rust identifier (<code>ident</code>) as argument and expands to a <code>{}</code> block (hence the double braces). The block defines a new wrapper function that calls the function <code>$name</code> and passes a pointer to the exception stack frame. Note that we&rsquo;re fixing the argument type to <code>*const ExceptionStackFrame</code>. If we used a <code>_</code> like before, the passed function could accept an arbitrary argument, which would lead to ugly bugs at runtime.</p>
 
-<p>Now we can use remove the <code>divide_by_zero_wrapper</code> and use our new <code>handler!</code> macro instead:</p>
+<p>Now we can remove the <code>divide_by_zero_wrapper</code> and use our new <code>handler!</code> macro instead:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
 
 <span class="n">lazy_static</span><span class="o">!</span><span class="w"> </span><span class="p">{</span><span class="w"></span>

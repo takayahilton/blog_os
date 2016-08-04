@@ -422,7 +422,7 @@ RSI=[...] RDI=[...] RBP=0000000000118d28 RSP=[...]
 
 &lt;p&gt;The macro takes a single Rust identifier (&lt;code&gt;ident&lt;/code&gt;) as argument and expands to a &lt;code&gt;{}&lt;/code&gt; block (hence the double braces). The block defines a new wrapper function that calls the function &lt;code&gt;$name&lt;/code&gt; and passes a pointer to the exception stack frame. Note that we&amp;rsquo;re fixing the argument type to &lt;code&gt;*const ExceptionStackFrame&lt;/code&gt;. If we used a &lt;code&gt;_&lt;/code&gt; like before, the passed function could accept an arbitrary argument, which would lead to ugly bugs at runtime.&lt;/p&gt;
 
-&lt;p&gt;Now we can use remove the &lt;code&gt;divide_by_zero_wrapper&lt;/code&gt; and use our new &lt;code&gt;handler!&lt;/code&gt; macro instead:&lt;/p&gt;
+&lt;p&gt;Now we can remove the &lt;code&gt;divide_by_zero_wrapper&lt;/code&gt; and use our new &lt;code&gt;handler!&lt;/code&gt; macro instead:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;// in src/interrupts/mod.rs&lt;/span&gt;
 
 &lt;span class=&#34;n&#34;&gt;lazy_static&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;!&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;p&#34;&gt;{&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
