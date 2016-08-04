@@ -571,6 +571,21 @@ error: references in statics may only refer to immutable values [E0017]
 
 <p>Fortunately the <code>lazy_static</code> macro exists. Instead of evaluating a <code>static</code> at compile time, the macro performs the initialization when the <code>static</code> is referenced the first time. Thus, we can do almost everything in the initialization block and are even able to read runtime values.</p>
 
+<p>Let&rsquo;s add the <code>lazy_static</code> crate to our project:</p>
+<div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/lib.rs</span>
+
+<span class="cp">#[macro_use]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="k">crate</span><span class="w"> </span><span class="n">lazy_static</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="c1"># in Cargo.toml</span>
+
+<span class="p">[</span><span class="n">dependencies</span><span class="p">.</span><span class="n">lazy_static</span><span class="p">]</span>
+<span class="n">version</span> <span class="o">=</span> <span class="s">&quot;0.2.1&quot;</span>
+<span class="n">features</span> <span class="o">=</span> <span class="p">[</span><span class="s">&quot;spin_no_std&quot;</span><span class="p">]</span>
+</code></pre></div>
+
+<p>We need the <code>spin_no_std</code> feature, since we don&rsquo;t link the standard library.</p>
+
 <p>With <code>lazy_static</code>, we can define our IDT without problems:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/interrupts/mod.rs</span>
 
