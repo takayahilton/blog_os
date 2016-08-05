@@ -1412,6 +1412,16 @@ Remote debugging using :1234
 &amp;gt; &lt;span class=&#34;nb&#34;&gt;cd&lt;/span&gt; bump_allocator
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
 
+&lt;p&gt;Normally, this subcrate would have its own &lt;code&gt;Cargo.lock&lt;/code&gt; and its own &lt;code&gt;target&lt;/code&gt; output folder. To avoid this, we can create a so-called &lt;em&gt;&lt;a href=&#34;http://doc.crates.io/manifest.html#the-workspace-section&#34;&gt;workspace&lt;/a&gt;&lt;/em&gt;. For that we only need to add a single line to our &lt;code&gt;Cargo.toml&lt;/code&gt;:&lt;/p&gt;
+&lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-toml&#34; data-lang=&#34;toml&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;# in Cargo.toml&lt;/span&gt;
+
+&lt;span class=&#34;p&#34;&gt;[&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;workspace&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
+
+&lt;p&gt;We don&amp;rsquo;t need to add any keys to the &lt;code&gt;workspace&lt;/code&gt; section, since they have &lt;a href=&#34;https://github.com/rust-lang/rfcs/blob/master/text/1525-cargo-workspace.md#implicit-relations&#34;&gt;sensible defaults&lt;/a&gt;. Now our &lt;code&gt;bump_allocator&lt;/code&gt; subcrate shares the &lt;code&gt;Cargo.toml&lt;/code&gt; and &lt;code&gt;target&lt;/code&gt; folder of the root project.&lt;/p&gt;
+
+&lt;h3 id=&#34;implementation&#34;&gt;Implementation&lt;/h3&gt;
+
 &lt;p&gt;Our allocator is very basic. It only keeps track of the next free address:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;// in libs/bump_allocator/src/lib.rs&lt;/span&gt;
 
@@ -1488,7 +1498,7 @@ Remote debugging using :1234
 
 &lt;p&gt;(Don&amp;rsquo;t worry, we will introduce a better allocator later in this post.)&lt;/p&gt;
 
-&lt;h3 id=&#34;custom-allocators-in-rust&#34;&gt;Custom Allocators in Rust&lt;/h3&gt;
+&lt;h2 id=&#34;custom-allocators-in-rust&#34;&gt;Custom Allocators in Rust&lt;/h2&gt;
 
 &lt;p&gt;In order to use our crate as system allocator, we add some attributes at the beginning of the file:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;// in libs/bump_allocator/src/lib.rs&lt;/span&gt;
@@ -1535,7 +1545,7 @@ Remote debugging using :1234
 
 &lt;p&gt;A more detailed documentation for these functions can be found in the &lt;a href=&#34;https://doc.rust-lang.org/nightly/alloc/heap/&#34;&gt;API docs for alloc::heap&lt;/a&gt;. Note that all of these functions and custom allocators in general are &lt;em&gt;unstable&lt;/em&gt; (as indicated by the &lt;code&gt;allocator&lt;/code&gt; feature gate).&lt;/p&gt;
 
-&lt;h3 id=&#34;implementation&#34;&gt;Implementation&lt;/h3&gt;
+&lt;h3 id=&#34;implementation-1&#34;&gt;Implementation&lt;/h3&gt;
 
 &lt;p&gt;Let&amp;rsquo;s implement the allocation functions using our new allocator. First we need a way to access the allocator. The functions do not know anything about our allocator, so we can only access it through a &lt;code&gt;static&lt;/code&gt;:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;// in libs/bump_allocator/src/lib.rs&lt;/span&gt;
@@ -1634,7 +1644,7 @@ Remote debugging using :1234
 
 &lt;p&gt;The &lt;code&gt;collections&lt;/code&gt; crate provides the &lt;a href=&#34;//doc.rust-lang.org/nightly/collections/macro.format!.html&#34;&gt;format!&lt;/a&gt; and &lt;a href=&#34;https://doc.rust-lang.org/nightly/collections/macro.vec!.html&#34;&gt;vec!&lt;/a&gt; macros, so we use &lt;code&gt;#[macro_use]&lt;/code&gt; to import them.&lt;/p&gt;
 
-&lt;h2 id=&#34;testing&#34;&gt;Testing&lt;/h2&gt;
+&lt;h3 id=&#34;testing&#34;&gt;Testing&lt;/h3&gt;
 
 &lt;p&gt;Now we should be able to allocate memory on the heap. Let&amp;rsquo;s try it in our &lt;code&gt;rust_main&lt;/code&gt;:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;// in rust_main in src/lib.rs&lt;/span&gt;
@@ -1642,8 +1652,6 @@ Remote debugging using :1234
 &lt;span class=&#34;kn&#34;&gt;use&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;n&#34;&gt;alloc&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;boxed&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;nb&#34;&gt;Box&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;;&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
 &lt;span class=&#34;kd&#34;&gt;let&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;n&#34;&gt;heap_test&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;=&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;nb&#34;&gt;Box&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;::&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;new&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;mi&#34;&gt;42&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;);&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
 &lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;
-
-&lt;p&gt;(If you&amp;rsquo;re getting a linker error about &lt;code&gt;_Unwind_Resume&lt;/code&gt;, try to use the &lt;a href=&#34;https://github.com/phil-opp/blog_os/pull/170&#34;&gt;panic=abort cargo option&lt;/a&gt;.)&lt;/p&gt;
 
 &lt;p&gt;When we run it, a triple fault occurs and causes permanent rebooting. Let&amp;rsquo;s try debug it using QEMU and objdump as described &lt;a href=&#34;http://os.phil-opp.com/remap-the-kernel.html#debugging&#34;&gt;in the previous post&lt;/a&gt;:&lt;/p&gt;
 
@@ -1758,9 +1766,7 @@ check_exception old: 0xffffffff new 0xe
 
 &lt;h3 id=&#34;mapping-the-heap&#34;&gt;Mapping the Heap&lt;/h3&gt;
 
-&lt;p&gt;Now we&amp;rsquo;re ready to map the heap pages. In order to do it, we need access to the &lt;code&gt;ActivePageTable&lt;/code&gt; or &lt;code&gt;Mapper&lt;/code&gt; instance (see the [previous post]). Therefore we return it from the &lt;code&gt;paging::remap_the_kernel&lt;/code&gt; function:&lt;/p&gt;
-
-&lt;p&gt;[previous post]: {{ page.previous.url }}&lt;/p&gt;
+&lt;p&gt;Now we&amp;rsquo;re ready to map the heap pages. In order to do it, we need access to the &lt;code&gt;ActivePageTable&lt;/code&gt; or &lt;code&gt;Mapper&lt;/code&gt; instance (see the &lt;a href=&#34;http://os.phil-opp.com/modifying-page-tables.html&#34;&gt;page table&lt;/a&gt; and &lt;a href=&#34;http://os.phil-opp.com/remap-the-kernel.html&#34;&gt;kernel remapping&lt;/a&gt; posts). Therefore we return it from the &lt;code&gt;paging::remap_the_kernel&lt;/code&gt; function:&lt;/p&gt;
 &lt;div class=&#34;highlight&#34;&gt;&lt;pre&gt;&lt;code class=&#34;language-rust&#34; data-lang=&#34;rust&#34;&gt;&lt;span&gt;&lt;/span&gt;&lt;span class=&#34;c1&#34;&gt;// in src/memory/paging/mod.rs&lt;/span&gt;
 
 &lt;span class=&#34;k&#34;&gt;pub&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;k&#34;&gt;fn&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;n&#34;&gt;remap_the_kernel&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;&amp;lt;&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;A&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;&amp;gt;&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;(&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;allocator&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;&amp;amp;&lt;/span&gt;&lt;span class=&#34;k&#34;&gt;mut&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;n&#34;&gt;A&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;,&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;n&#34;&gt;boot_info&lt;/span&gt;&lt;span class=&#34;o&#34;&gt;:&lt;/span&gt;&lt;span class=&#34;w&#34;&gt; &lt;/span&gt;&lt;span class=&#34;o&#34;&gt;&amp;amp;&lt;/span&gt;&lt;span class=&#34;n&#34;&gt;BootInformation&lt;/span&gt;&lt;span class=&#34;p&#34;&gt;)&lt;/span&gt;&lt;span class=&#34;w&#34;&gt;&lt;/span&gt;
@@ -1942,7 +1948,7 @@ check_exception old: 0xffffffff new 0xe
 
 &lt;p&gt;The easiest way to ensure that adjacent holes are always merged, is to keep the hole list sorted by address. Thus, we only need to check the predecessor and the successor in the list when we free a memory block. If they are adjacent to the freed block, we merge the corresponding holes. Else, we insert the freed block as a new hole at the correct position.&lt;/p&gt;
 
-&lt;h3 id=&#34;implementation-1&#34;&gt;Implementation&lt;/h3&gt;
+&lt;h3 id=&#34;implementation-2&#34;&gt;Implementation&lt;/h3&gt;
 
 &lt;p&gt;The detailed implementation would go beyond the scope of this post, since it contains several hidden difficulties. For example:&lt;/p&gt;
 

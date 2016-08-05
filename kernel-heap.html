@@ -100,6 +100,16 @@
 &gt; <span class="nb">cd</span> bump_allocator
 </code></pre></div>
 
+<p>Normally, this subcrate would have its own <code>Cargo.lock</code> and its own <code>target</code> output folder. To avoid this, we can create a so-called <em><a href="http://doc.crates.io/manifest.html#the-workspace-section">workspace</a></em>. For that we only need to add a single line to our <code>Cargo.toml</code>:</p>
+<div class="highlight"><pre><code class="language-toml" data-lang="toml"><span></span><span class="c1"># in Cargo.toml</span>
+
+<span class="p">[</span><span class="n">workspace</span><span class="p">]</span>
+</code></pre></div>
+
+<p>We don&rsquo;t need to add any keys to the <code>workspace</code> section, since they have <a href="https://github.com/rust-lang/rfcs/blob/master/text/1525-cargo-workspace.md#implicit-relations">sensible defaults</a>. Now our <code>bump_allocator</code> subcrate shares the <code>Cargo.toml</code> and <code>target</code> folder of the root project.</p>
+
+<h3 id="implementation">Implementation</h3>
+
 <p>Our allocator is very basic. It only keeps track of the next free address:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/bump_allocator/src/lib.rs</span>
 
@@ -176,7 +186,7 @@
 
 <p>(Don&rsquo;t worry, we will introduce a better allocator later in this post.)</p>
 
-<h3 id="custom-allocators-in-rust">Custom Allocators in Rust</h3>
+<h2 id="custom-allocators-in-rust">Custom Allocators in Rust</h2>
 
 <p>In order to use our crate as system allocator, we add some attributes at the beginning of the file:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/bump_allocator/src/lib.rs</span>
@@ -223,7 +233,7 @@
 
 <p>A more detailed documentation for these functions can be found in the <a href="https://doc.rust-lang.org/nightly/alloc/heap/">API docs for alloc::heap</a>. Note that all of these functions and custom allocators in general are <em>unstable</em> (as indicated by the <code>allocator</code> feature gate).</p>
 
-<h3 id="implementation">Implementation</h3>
+<h3 id="implementation-1">Implementation</h3>
 
 <p>Let&rsquo;s implement the allocation functions using our new allocator. First we need a way to access the allocator. The functions do not know anything about our allocator, so we can only access it through a <code>static</code>:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in libs/bump_allocator/src/lib.rs</span>
@@ -322,7 +332,7 @@
 
 <p>The <code>collections</code> crate provides the <a href="//doc.rust-lang.org/nightly/collections/macro.format!.html">format!</a> and <a href="https://doc.rust-lang.org/nightly/collections/macro.vec!.html">vec!</a> macros, so we use <code>#[macro_use]</code> to import them.</p>
 
-<h2 id="testing">Testing</h2>
+<h3 id="testing">Testing</h3>
 
 <p>Now we should be able to allocate memory on the heap. Let&rsquo;s try it in our <code>rust_main</code>:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in rust_main in src/lib.rs</span>
@@ -330,8 +340,6 @@
 <span class="kn">use</span><span class="w"> </span><span class="n">alloc</span><span class="o">::</span><span class="n">boxed</span><span class="o">::</span><span class="nb">Box</span><span class="p">;</span><span class="w"></span>
 <span class="kd">let</span><span class="w"> </span><span class="n">heap_test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Box</span><span class="o">::</span><span class="n">new</span><span class="p">(</span><span class="mi">42</span><span class="p">);</span><span class="w"></span>
 </code></pre></div>
-
-<p>(If you&rsquo;re getting a linker error about <code>_Unwind_Resume</code>, try to use the <a href="https://github.com/phil-opp/blog_os/pull/170">panic=abort cargo option</a>.)</p>
 
 <p>When we run it, a triple fault occurs and causes permanent rebooting. Let&rsquo;s try debug it using QEMU and objdump as described <a href="http://os.phil-opp.com/remap-the-kernel.html#debugging">in the previous post</a>:</p>
 
@@ -446,9 +454,7 @@ check_exception old: 0xffffffff new 0xe
 
 <h3 id="mapping-the-heap">Mapping the Heap</h3>
 
-<p>Now we&rsquo;re ready to map the heap pages. In order to do it, we need access to the <code>ActivePageTable</code> or <code>Mapper</code> instance (see the [previous post]). Therefore we return it from the <code>paging::remap_the_kernel</code> function:</p>
-
-<p>[previous post]: {{ page.previous.url }}</p>
+<p>Now we&rsquo;re ready to map the heap pages. In order to do it, we need access to the <code>ActivePageTable</code> or <code>Mapper</code> instance (see the <a href="/modifying-page-tables.html">page table</a> and <a href="/remap-the-kernel.html">kernel remapping</a> posts). Therefore we return it from the <code>paging::remap_the_kernel</code> function:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/paging/mod.rs</span>
 
 <span class="k">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">remap_the_kernel</span><span class="o">&lt;</span><span class="n">A</span><span class="o">&gt;</span><span class="p">(</span><span class="n">allocator</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">A</span><span class="p">,</span><span class="w"> </span><span class="n">boot_info</span><span class="o">:</span><span class="w"> </span><span class="o">&amp;</span><span class="n">BootInformation</span><span class="p">)</span><span class="w"></span>
@@ -630,7 +636,7 @@ check_exception old: 0xffffffff new 0xe
 
 <p>The easiest way to ensure that adjacent holes are always merged, is to keep the hole list sorted by address. Thus, we only need to check the predecessor and the successor in the list when we free a memory block. If they are adjacent to the freed block, we merge the corresponding holes. Else, we insert the freed block as a new hole at the correct position.</p>
 
-<h3 id="implementation-1">Implementation</h3>
+<h3 id="implementation-2">Implementation</h3>
 
 <p>The detailed implementation would go beyond the scope of this post, since it contains several hidden difficulties. For example:</p>
 
