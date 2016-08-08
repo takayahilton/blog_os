@@ -5,6 +5,10 @@ rust:
 
 sudo: false
 
+os:
+  - linux
+  - osx
+
 notifications:
     email:
         on_success: never
@@ -14,6 +18,15 @@ addons:
   apt:
     packages:
       - nasm
+      - cmake
+      - libssl-dev
+
+before_script:
+  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew update ; fi
+  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew tap sevki/gcc_cross_compilers ; fi
+  #- if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew install x86_64-elf-gcc x86_64-elf-binutils nasm; fi
+  - if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then brew install nasm; fi
+  - cargo install xargo
 
 script: bash scripts/travis-build.sh
 
