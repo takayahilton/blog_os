@@ -128,7 +128,7 @@
 <li>The <code>no_mangle</code> attribute disables the automatic <a href="https://en.wikipedia.org/wiki/Name_mangling">name mangling</a> that Rust uses to get unique function names. We want to do a <code>call rust_main</code> from our assembly code, so this function name must stay as it is.</li>
 <li>We mark our main function as <code>extern</code> to make it compatible to the standard C <a href="https://en.wikipedia.org/wiki/Calling_convention">calling convention</a>.</li>
 <li>The <code>lang</code> attribute defines a Rust <a href="https://doc.rust-lang.org/book/lang-items.html">language item</a>.</li>
-<li>The <code>eh_personality</code> function is used for Rust&rsquo;s <a href="https://doc.rust-lang.org/std/rt/unwind/">unwinding</a> on <code>panic!</code>. We can leave it empty since we don&rsquo;t have any unwinding support in our OS yet.</li>
+<li>The <code>eh_personality</code> function is used for Rust&rsquo;s <a href="https://doc.rust-lang.org/nomicon/unwinding.html">unwinding</a> on <code>panic!</code>. We can leave it empty since we don&rsquo;t have any unwinding support in our OS yet.</li>
 <li>The <code>panic_fmt</code> function is the entry point on panic. Right now we can&rsquo;t do anything useful, so we just make sure that it doesn&rsquo;t return (required by the <code>!</code> return type).</li>
 </ul>
 

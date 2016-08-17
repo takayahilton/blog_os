@@ -5124,7 +5124,7 @@ multiboot_start: 0x11d400, multiboot_end: 0x11d9c8
 &lt;li&gt;The &lt;code&gt;no_mangle&lt;/code&gt; attribute disables the automatic &lt;a href=&#34;https://en.wikipedia.org/wiki/Name_mangling&#34;&gt;name mangling&lt;/a&gt; that Rust uses to get unique function names. We want to do a &lt;code&gt;call rust_main&lt;/code&gt; from our assembly code, so this function name must stay as it is.&lt;/li&gt;
 &lt;li&gt;We mark our main function as &lt;code&gt;extern&lt;/code&gt; to make it compatible to the standard C &lt;a href=&#34;https://en.wikipedia.org/wiki/Calling_convention&#34;&gt;calling convention&lt;/a&gt;.&lt;/li&gt;
 &lt;li&gt;The &lt;code&gt;lang&lt;/code&gt; attribute defines a Rust &lt;a href=&#34;https://doc.rust-lang.org/book/lang-items.html&#34;&gt;language item&lt;/a&gt;.&lt;/li&gt;
-&lt;li&gt;The &lt;code&gt;eh_personality&lt;/code&gt; function is used for Rust&amp;rsquo;s &lt;a href=&#34;https://doc.rust-lang.org/std/rt/unwind/&#34;&gt;unwinding&lt;/a&gt; on &lt;code&gt;panic!&lt;/code&gt;. We can leave it empty since we don&amp;rsquo;t have any unwinding support in our OS yet.&lt;/li&gt;
+&lt;li&gt;The &lt;code&gt;eh_personality&lt;/code&gt; function is used for Rust&amp;rsquo;s &lt;a href=&#34;https://doc.rust-lang.org/nomicon/unwinding.html&#34;&gt;unwinding&lt;/a&gt; on &lt;code&gt;panic!&lt;/code&gt;. We can leave it empty since we don&amp;rsquo;t have any unwinding support in our OS yet.&lt;/li&gt;
 &lt;li&gt;The &lt;code&gt;panic_fmt&lt;/code&gt; function is the entry point on panic. Right now we can&amp;rsquo;t do anything useful, so we just make sure that it doesn&amp;rsquo;t return (required by the &lt;code&gt;!&lt;/code&gt; return type).&lt;/li&gt;
 &lt;/ul&gt;
 
