@@ -735,7 +735,7 @@ SECTIONS {
 
 <h3 id="testing-it">Testing it</h3>
 
-<p>Time to test it! We reexport the <code>remap_the_kernel</code> function from the memory module and call it from <code>rust_main</code>:</p>
+<p>Time to test it! We re-export the <code>remap_the_kernel</code> function from the memory module and call it from <code>rust_main</code>:</p>
 <div class="highlight"><pre><code class="language-rust" data-lang="rust"><span></span><span class="c1">// in src/memory/mod.rs</span>
 <span class="k">pub</span><span class="w"> </span><span class="kn">use</span><span class="w"> </span><span class="bp">self</span><span class="o">::</span><span class="n">paging</span><span class="o">::</span><span class="n">remap_the_kernel</span><span class="p">;</span><span class="w"></span>
 </code></pre></div>

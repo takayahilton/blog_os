@@ -222,11 +222,11 @@
 <h3 id="putting-it-together">Putting it together</h3>
 
 <p>We just call these check functions right after start:</p>
-<div class="highlight"><pre><code class="language-nasm" data-lang="nasm"><span></span><span class="k">global</span> <span class="nv">_start</span>
+<div class="highlight"><pre><code class="language-nasm" data-lang="nasm"><span></span><span class="k">global</span> <span class="nv">start</span>
 
 <span class="k">section</span> <span class="nv">.text</span>
 <span class="k">bits</span> <span class="mi">32</span>
-<span class="nl">_start:</span>
+<span class="nl">start:</span>
     <span class="nf">mov</span> <span class="nb">esp</span><span class="p">,</span> <span class="nv">stack_top</span>
 
     <span class="nf">call</span> <span class="nb">ch</span><span class="nv">eck_multiboot</span>
