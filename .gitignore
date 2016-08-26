@@ -12,3 +12,5 @@
 
 # Build directory
 /build/
+/.idea/
+Cargo.lock
